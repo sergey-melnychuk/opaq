@@ -1,0 +1,11 @@
+[package]
+name = "poseidon_check"
+type = "bin"
+authors = [""]
+
+# M0 spike (OPAQ.md B.0): proves the circuit hashes with ORIGINAL Poseidon
+# (Circom BN254 params), the same family light-poseidon / solana-poseidon use —
+# NOT std::hash::poseidon2. Throwaway-ish; this directory exists only to settle
+# the variant question before any real circuit is written.
+[dependencies]
+poseidon = { git = "https://github.com/noir-lang/poseidon", tag = "v0.3.0" }

@@ -1,0 +1,9 @@
+{
+  "name": "opaq-tests",
+  "private": true,
+  "type": "module",
+  "description": "Client-side tests against a local validator (zero-infra read/submit path).",
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0"
+  }
+}

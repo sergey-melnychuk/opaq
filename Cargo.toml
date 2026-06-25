@@ -1,0 +1,24 @@
+# Opaq Rust workspace. Members added as phases land:
+#   crates/common   — shared note encoding + Poseidon helpers (seeded by the M0 spike)
+#   crates/prover   — off-chain prover CLI (B.7)        [later]
+#   programs/opaq   — Anchor on-chain program (B.5)     [later]
+[workspace]
+resolver = "2"
+# programs/poseidon-syscall-check is intentionally a SEPARATE workspace (it has
+# its own [workspace] table + lockfile): cargo build-sbf parses the whole
+# workspace graph, and the host crates here pull solana 3.x deps that require
+# edition2024 (unsupported by the SBF platform-tools cargo 1.84). Isolating the
+# SBF program lets it pin the edition-2021-friendly solana 2.x line.
+members = ["crates/common"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Pinned per OPAQ.md B.1. Re-verify before drift.
+light-poseidon = "0.4"
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+solana-poseidon = "3"
+hex = "0.4"

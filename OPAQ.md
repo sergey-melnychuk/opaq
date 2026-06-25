@@ -305,11 +305,12 @@ immediately on install and do not drift mid-project.
 
 | Tool | Pin to | Install |
 |------|--------|---------|
-| Noir / `nargo` | `1.0.0-beta.20` (latest beta; 1.0 stable not yet released as of writing — check `noir-lang/noir` releases for a newer beta or stable tag first) | `noirup --version 1.0.0-beta.20` |
-| Barretenberg / `bb` | paired version for the above nargo release (check Noir release notes for the exact paired `bb` tag — betas pin tightly to specific `bb` builds) | installed via `bbup` or bundled with `noirup` |
-| `noir-lang/poseidon` library | latest tag compatible with nargo `1.0.0-beta.20` (check repo for compatibility table; this library has had breaking changes across Noir versions) | git dependency in `Nargo.toml` |
-| Anchor | `1.0.0` (stable, released 2026-04-02) | `avm install 1.0.0 && avm use 1.0.0` |
-| Solana CLI / Agave | latest stable matching Anchor 1.0.0's tested range (check Anchor 1.0.0 release notes for the Agave version it was validated against) | `agave-install` |
+| Noir / `nargo` | `1.0.0-beta.22` (installed & verified by M0; newer beta than the original beta.20 pin, sanctioned per this row's guidance) | `noirup --version 1.0.0-beta.22` |
+| Barretenberg / `bb` | `5.0.0-nightly.20260522` (installed; verify it pairs with nargo beta.22 before proof work at M1) | installed via `bbup` or bundled with `noirup` |
+| `noir-lang/poseidon` library | `v0.3.0` (verified compatible with nargo beta.22 by the M0 spike). **Module path is `poseidon::poseidon::bn254::*`, not `dep::poseidon::bn254::*`** — see B.4.1. | `poseidon = { git = "https://github.com/noir-lang/poseidon", tag = "v0.3.0" }` in `Nargo.toml` |
+| Anchor | spec target `1.0.0`; **installed reality is `0.32.1`** — reconcile before M6 (try `avm install 1.0.0`; if 1.0.0 isn't actually published, pin the program to 0.32.1 and adjust account macros accordingly) | `avm install <ver> && avm use <ver>` |
+| Solana CLI / Agave | `3.0.15` (installed & used for the M0 validator deploy) | `agave-install` |
+| **SBF platform-tools** | **`v1.54` (ships rust/cargo `1.89`).** The default bundled with `cargo build-sbf` here is **v1.51 (cargo 1.84)**, which **cannot build any solana 3.x program** — the 3.x dep graph transitively requires `edition2024` (`wincode`, `zeroize 1.9`, `blake3 1.8 → cmov`, `toml_edit 0.25`…), unsupported before cargo 1.85, and `build-sbf` fails at manifest-parse time. Install once: `cargo build-sbf --install-only --force-tools-install --tools-version v1.54`, then **always pass `--tools-version v1.54`** to `cargo build-sbf`. Discovered while closing M0's on-chain leg. | `cargo build-sbf --tools-version v1.54` |
 | Rust | toolchain pinned via `rust-toolchain.toml` at repo root — use whatever stable version Anchor 1.0.0's docs specify | `rustup` |
 | `light-poseidon` (Rust crate, off-chain prover) | `^0.4.0` | Cargo dependency |
 | `solana-poseidon` (Rust crate, on-chain program) | latest `3.x` (confirm exact patch on crates.io at setup time) | Cargo dependency |
@@ -423,7 +424,11 @@ writing any code, so the whole team/agent session builds identically.
 **B.4.1 `circuits/deposit/src/main.nr`**
 
 ```rust
-use dep::poseidon::bn254::hash_4;
+// Import path note: in noir-lang/poseidon v0.3.0 (nargo 1.0.0-beta.22) the path
+// is `poseidon::poseidon::bn254::*` — crate `poseidon`, module `poseidon`,
+// submodule `bn254`. No `dep::` prefix (removed in modern Noir). Verified by the
+// M0 spike in circuits/poseidon_check.
+use poseidon::poseidon::bn254::hash_4;
 
 // Purpose of this proof: it is what BINDS the deposited amount/token (public
 // inputs, which the on-chain `deposit` instruction checks against the actual
@@ -454,7 +459,7 @@ fn main(
 **B.4.2 `circuits/withdraw/src/main.nr`**
 
 ```rust
-use dep::poseidon::bn254::{hash_1, hash_2, hash_4};
+use poseidon::poseidon::bn254::{hash_1, hash_2, hash_4};  // path note: see B.4.1
 
 global TREE_DEPTH: u32 = 24;
 

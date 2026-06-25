@@ -1,0 +1,14 @@
+# Rust / Anchor / SBF build output
+/target
+**/target/
+
+# Noir build output
+**/proofs/
+*.gz
+
+# Node
+node_modules/
+
+# Local validator ledgers / logs
+test-ledger/
+*.log

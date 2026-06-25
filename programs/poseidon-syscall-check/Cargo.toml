@@ -1,0 +1,31 @@
+# Standalone workspace — see root Cargo.toml for why this is detached.
+[workspace]
+
+[package]
+name = "poseidon-syscall-check"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# M0 (OPAQ.md B.0 step 4): a trivial on-chain instruction that runs the REAL
+# sol_poseidon syscall in the SBF VM and confirms its output matches the
+# off-chain light-poseidon / Noir reference vectors. Throwaway once M0 is signed
+# off; kept as a regression guard against a syscall behavior change.
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+# Build with: cargo build-sbf --tools-version v1.54
+# (platform-tools v1.54 ships rust/cargo 1.89, which supports edition2024; the
+# default v1.51 ships cargo 1.84 and CANNOT parse the solana 3.x dep graph.)
+solana-program = "3"
+solana-poseidon = "3"
+
+# NB: the in-process `solana-program-test` harness is intentionally NOT used —
+# it pulls the full Agave runtime (blake3 → digest 0.11 → ctutils → cmov 0.5.4),
+# which requires `edition2024` and breaks the SBF platform-tools cargo (1.84).
+# M0's on-chain leg is exercised via a real solana-test-validator deploy +
+# a JS client instead — see scripts/m0-onchain.sh and tests/m0_syscall.mjs.
