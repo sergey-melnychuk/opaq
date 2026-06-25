@@ -472,7 +472,8 @@ fn main(
     spend_key: Field,
     blinding_factor: Field,
     merkle_path: [Field; TREE_DEPTH],
-    merkle_path_indices: [u1; TREE_DEPTH],  // 0 = left, 1 = right at each level
+    merkle_path_indices: [bool; TREE_DEPTH],  // false = current is left, true = current is right
+                                              // (was `u1`; u1 removed in nargo beta.22 — use bool)
 ) {
     amount.assert_max_bit_size::<64>();   // see B.4.1 — required for value safety
 
@@ -483,10 +484,10 @@ fn main(
     let mut current = commitment;
     for i in 0..TREE_DEPTH {
         let sibling = merkle_path[i];
-        current = if merkle_path_indices[i] == 0 {
-            hash_2([current, sibling])
-        } else {
+        current = if merkle_path_indices[i] {
             hash_2([sibling, current])
+        } else {
+            hash_2([current, sibling])
         };
     }
     assert(current == merkle_root);
@@ -495,9 +496,11 @@ fn main(
     let computed_nullifier = hash_2([commitment, spend_key]);
     assert(computed_nullifier == nullifier);
 
-    // recipient is a public input — bound into the proof so it can't be
-    // swapped after generation, but otherwise unconstrained by circuit logic
-    let _ = recipient;
+    // recipient is a public input — bound into the proof so it can't be swapped
+    // after generation, but otherwise unconstrained. `let _ = recipient` lets
+    // the optimizer drop it from the public inputs; use `std::as_witness(recipient)`
+    // to KEEP it as a verified public input (confirmed via the compiled ABI).
+    std::as_witness(recipient);
 }
 ```
 

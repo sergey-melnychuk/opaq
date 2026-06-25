@@ -6,14 +6,49 @@
 use light_poseidon::{Poseidon, PoseidonBytesHasher};
 use ark_bn254::Fr;
 
-/// Original Poseidon (Circom BN254 params) over two 32-byte big-endian field
+/// Original Poseidon (Circom BN254 params) over N 32-byte big-endian field
 /// elements, returning a 32-byte big-endian field element — matching the
-/// circuit's `poseidon::bn254::hash_2` and the Solana `sol_poseidon` syscall.
+/// circuit's `poseidon::poseidon::bn254::hash_N` and the Solana `sol_poseidon`
+/// syscall (verified byte-identical in M0, see tests + scripts/m0-onchain.sh).
+pub fn poseidon_be(inputs: &[[u8; 32]]) -> [u8; 32] {
+    let refs: Vec<&[u8]> = inputs.iter().map(|x| x.as_slice()).collect();
+    let mut hasher = Poseidon::<Fr>::new_circom(inputs.len()).expect("circom poseidon params");
+    hasher.hash_bytes_be(&refs).expect("poseidon hash_bytes_be")
+}
+
+/// Two-input Poseidon (kept for the M0 parity test's explicit name).
 pub fn poseidon_hash2_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = Poseidon::<Fr>::new_circom(2).expect("circom poseidon(2) params");
-    hasher
-        .hash_bytes_be(&[a, b])
-        .expect("poseidon hash_bytes_be")
+    poseidon_be(&[*a, *b])
+}
+
+/// Canonical field encoding of a 32-byte value (OPAQ.md B.4.2): a Pubkey/mint is
+/// 256 bits and overflows the BN254 field, so split into two 128-bit big-endian
+/// limbs and Poseidon-hash them. Used for `token_id` and `recipient`.
+pub fn to_field_be(bytes32: &[u8; 32]) -> [u8; 32] {
+    let mut hi = [0u8; 32];
+    hi[16..].copy_from_slice(&bytes32[0..16]);
+    let mut lo = [0u8; 32];
+    lo[16..].copy_from_slice(&bytes32[16..32]);
+    poseidon_be(&[hi, lo])
+}
+
+/// Fold a leaf up a Merkle path to its root. `right[i] == true` means the
+/// running hash is the right child at level i (sibling on the left).
+pub fn merkle_root_be(leaf: [u8; 32], siblings: &[[u8; 32]], right: &[bool]) -> [u8; 32] {
+    let mut cur = leaf;
+    for (sib, &is_right) in siblings.iter().zip(right) {
+        cur = if is_right {
+            poseidon_be(&[*sib, cur])
+        } else {
+            poseidon_be(&[cur, *sib])
+        };
+    }
+    cur
+}
+
+/// Format a field element as a `0x`-prefixed hex string for Noir `Prover.toml`.
+pub fn field_hex(bytes32: &[u8; 32]) -> String {
+    format!("0x{}", hex::encode(bytes32))
 }
 
 /// 32-byte big-endian representation of a small integer (test/helper).

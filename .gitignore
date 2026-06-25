@@ -6,6 +6,9 @@
 **/proofs/
 *.gz
 
+# Generated witness fixtures (deterministic; produced by gen_witness / prove.sh)
+circuits/*/Prover.toml
+
 # Node
 node_modules/
 
