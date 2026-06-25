@@ -45,6 +45,18 @@ fn main() {
         field_hex(&blinding),
     );
     write(&circuits_dir, "deposit", &deposit);
+    write_json(
+        &circuits_dir,
+        "deposit",
+        &[
+            ("token_id", field_hex(&token_id)),
+            ("amount", field_hex(&amount)),
+            ("new_commitment", field_hex(&commitment)),
+            ("owner_pubkey", field_hex(&owner_pubkey)),
+            ("blinding_factor", field_hex(&blinding)),
+        ],
+        &[],
+    );
 
     // --- withdraw/Prover.toml ---
     // Simple valid path: leaf at index 0, all-left, zero siblings. The root is
@@ -85,6 +97,23 @@ fn main() {
         idx_list,
     );
     write(&circuits_dir, "withdraw", &withdraw);
+    write_json(
+        &circuits_dir,
+        "withdraw",
+        &[
+            ("merkle_root", field_hex(&merkle_root)),
+            ("nullifier", field_hex(&nullifier)),
+            ("token_id", field_hex(&token_id)),
+            ("amount", field_hex(&amount)),
+            ("recipient", field_hex(&recipient)),
+            ("spend_key", field_hex(&spend_key)),
+            ("blinding_factor", field_hex(&blinding)),
+        ],
+        &[
+            ("merkle_path", siblings.iter().map(|s| field_hex(s)).collect()),
+            ("merkle_path_indices", right.iter().map(|b| if *b { "0x1".to_string() } else { "0x0".to_string() }).collect()),
+        ],
+    );
 
     println!("commitment = {}", field_hex(&commitment));
     println!("nullifier  = {}", field_hex(&nullifier));
@@ -102,5 +131,27 @@ fn dummy_pubkey(seed: u8) -> [u8; 32] {
 fn write(circuits_dir: &std::path::Path, circuit: &str, contents: &str) {
     let path = circuits_dir.join(circuit).join("Prover.toml");
     fs::write(&path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    println!("wrote {}", path.display());
+}
+
+/// ABI-shaped `inputs.json` for the Noir->Groth16 pipeline (noir-cli interop):
+/// a flat map of input name -> "0x.." string, with array inputs as JSON arrays.
+fn write_json(
+    circuits_dir: &std::path::Path,
+    circuit: &str,
+    scalars: &[(&str, String)],
+    arrays: &[(&str, Vec<String>)],
+) {
+    let mut entries: Vec<String> = scalars
+        .iter()
+        .map(|(k, v)| format!("\"{k}\":\"{v}\""))
+        .collect();
+    for (k, vs) in arrays {
+        let arr = vs.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(",");
+        entries.push(format!("\"{k}\":[{arr}]"));
+    }
+    let json = format!("{{{}}}", entries.join(","));
+    let path = circuits_dir.join(circuit).join("inputs.json");
+    fs::write(&path, json).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     println!("wrote {}", path.display());
 }
