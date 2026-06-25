@@ -1,0 +1,21 @@
+# Standalone workspace (see root Cargo.toml) — detached so cargo build-sbf only
+# resolves this program's graph. Build with: cargo build-sbf --tools-version v1.54
+[workspace]
+
+[package]
+name = "cu-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# M0.5 (OPAQ.md B.6 CU-feasibility): measure real Solana compute-unit cost per
+# alt_bn128 op and per BN254 Fr multiply, to decide UltraHonk vs Groth16 before
+# writing the verifier. Throwaway.
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "3"
+solana-bn254 = "3"
+ark-bn254 = { version = "0.5", default-features = false, features = ["scalar_field"] }
+ark-ff = { version = "0.5", default-features = false }

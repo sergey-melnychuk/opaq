@@ -628,6 +628,36 @@ serialization, so it must be made before the public-input layout is frozen, not
 after. Honk's "no trusted setup" advantage is real but is not worth a Phase 1
 that can't verify a proof in one transaction.
 
+**M0.5 RESULT (measured 2026-06-26, this validator — see scripts/m05-cu.sh):**
+Per-op CU measured on-chain via `programs/cu-probe`:
+`alt_bn128` G1 mul = **3,873 CU**, G1 add = **367 CU**, BN254 Fr mul in pure BPF
+(ark-ff) = **2,036 CU** (Solana has no field-mul syscall — sumcheck field work
+gets no acceleration). Plugged into verifier-cost models for the withdraw
+circuit (~2^15 gates, d=15, ~44 entities, 5 public inputs):
+
+| backend | EC ops | field ops | total | vs 1.4M ceiling |
+|---------|--------|-----------|-------|-----------------|
+| **UltraHonk** | ~365k CU (fits) | 2,000–8,000 Fr muls | **4.4M–16.7M CU** | **3×–12× OVER** |
+| **Groth16** | ~170k CU | ~none | **~272k CU** | **FITS (>5× headroom)** |
+
+The Honk EC portion fits comfortably; the sumcheck **field arithmetic** is what
+blows the budget (a probe of just 2,000 BPF Fr-muls exhausted the entire 1.4M
+budget mid-run). Groth16 has no sumcheck and matches Light Protocol's published
+~200–300k CU. **Decision: Phase 1 uses Groth16.** Honk-on-Solana would require
+splitting verification across multiple transactions with a verification-state
+account — breaking nullifier/tree-update atomicity — and is out of scope.
+
+**Open follow-on (blocks M1+ backend work):** `bb` produces UltraHonk/UltraPlonk,
+**not Groth16** — Barretenberg has no Groth16 backend. Noir→Groth16 is not
+turnkey. The closest Solana prior art (Light Protocol) writes circuits in
+**Circom** and proves Groth16 via snarkjs/arkworks. So adopting Groth16 forces a
+circuit-toolchain decision that touches A.1's "Circuit language: Noir" choice —
+resolve before writing the verifier (B.6) or re-doing circuits. Options: (a)
+Circom + Groth16 (Light's path, proven on Solana, loses Noir readability); (b)
+a Groth16 backend for Noir's ACIR (research-grade, risky); (c) stay Noir+Honk
+with split verification (large, breaks atomicity). The M1/M2 Noir circuits
+already built still encode the correct constraints and port directly to Circom.
+
 **Time-boxing advice:** this step alone could take longer than everything
 else combined if the verifier math has any subtlety the agent misjudges.
 Budget accordingly — if B.0's Poseidon check passes but this step stalls, the
