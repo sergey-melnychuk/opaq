@@ -66,7 +66,17 @@ prove_note withdraw "$ROOT/circuits/withdraw/inputs.json" "$WORK/withdraw.bin"
 echo "==> build opaq (fixed VKs)"
 ( cd "$PROG" && cargo build-sbf --tools-version v1.54 )
 SBF_DEPLOY="${CARGO_TARGET_DIR:-$PROG/target}/deploy"
-PROG_KP="$SBF_DEPLOY/opaq-keypair.json"
+# Deploy under a FRESH program keypair so the tree PDA starts empty: the demo
+# note then lands at leaf_index 0, for which the gen_witness path/root (index 0,
+# empty-tree siblings) is valid. (Reusing a program reuses its accumulating tree,
+# so an index-0 proof's root is no longer current -> E_UNKNOWN_ROOT. For reuse
+# you'd reconstruct the path via the M10 read path instead.)
+if [[ "${OPAQ_SKIP_DEPLOY:-}" != "1" ]]; then
+  PROG_KP="$WORK/program.json"
+  solana-keygen new --no-bip39-passphrase --silent --force -o "$PROG_KP" >/dev/null
+else
+  PROG_KP="$SBF_DEPLOY/opaq-keypair.json"
+fi
 PROG_ID="$(solana-keygen pubkey "$PROG_KP")"
 
 ensure_sol() {

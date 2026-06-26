@@ -830,9 +830,11 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
           to devnet (default RPC https://api.devnet.solana.com), and runs Test 1
           (deposit -> withdraw round-trip) via tests/m11_devnet_demo.mjs against
           the public RPC — with RPC 429 retries/pacing for devnet rate limits.
-          Latest deploy metadata: deploy/devnet-latest.json. Set OPAQ_DEVNET_RPC
-          for a dedicated endpoint; OPAQ_SKIP_DEPLOY=1 to re-demo only.
-          Program (devnet): 6pYEXT3qTqHtizWZsBkzZWMW4YQ8Sm3GDMdodNuyawpU
+          Deploys a FRESH program keypair each run (clean tree, so the demo note
+          is at leaf_index 0 and its index-0 proof's root is current) — reusing a
+          program would need the M10 read-path reconstruction. The program id
+          therefore changes per run; the source of truth is deploy/devnet-latest.json
+          (not a fixed id here). Set OPAQ_DEVNET_RPC for a dedicated endpoint.
 ```
 
 ### B.10 Explicitly Out of Scope for Phase 1

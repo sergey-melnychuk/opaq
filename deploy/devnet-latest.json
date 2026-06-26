@@ -1,7 +1,7 @@
 {
   "rpc": "https://api.devnet.solana.com",
-  "program_id": "6aKpMhuxQe9jVDyzbuBzKPNwUbUf3CTb2G9ByHbn7KFo",
-  "deployed_at": "2026-06-26T17:50:45Z",
-  "demo_mint_hex": "8521ba3cd11a016400db1cf8319c63fc1640d1bc55cd110ce9aa549f6cab0893",
+  "program_id": "FtjUw62LvzntVCx8voypcYtSC9Z9GFUEagZFggBCRwTi",
+  "deployed_at": "2026-06-26T21:24:32Z",
+  "demo_mint_hex": "d4013d9bd2d44cf26c2a682e927512f3458dc2361c8711c3dd8d6863db1aad7e",
   "note": "Insecure test-ceremony VKs (OPAQ.md B.6). Re-run scripts/m11-devnet.sh to redeploy with fresh proofs."
 }
