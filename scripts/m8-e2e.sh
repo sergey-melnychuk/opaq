@@ -25,20 +25,38 @@ export OPAQ_RECIPIENT_HEX="$(hexpub "$WORK/recipient.json")"
 export OPAQ_AMOUNT=1000
 echo "    mint=$OPAQ_MINT_HEX"
 
-# prove a circuit (real values via exported env), regenerate its embedded VK,
-# and emit the program instruction blob.
-emit_ix() {
-  local c="$1" ptau="$2"
-  PTAU_POWER="$ptau" "$ROOT/scripts/groth16-prove.sh" "$ROOT/circuits/$c" >/dev/null
-  cargo run -q --manifest-path "$VKMF" --bin emit_artifacts -- "$GROTH" "$WORK" >/dev/null
-  mv -f "$WORK/vk.rs" "$PROG/src/vk_$c.rs"
-  cargo run -q --manifest-path "$VKMF" --bin emit_opaq_instruction -- \
-    "$c" "$GROTH" "$ROOT/circuits/e2e_values.json" "$WORK/$c.bin"
-}
-echo "==> prove + embed VK: deposit";  emit_ix deposit 14
-echo "==> prove + embed VK: withdraw"; emit_ix withdraw 16
+# Note A's witnesses (deposit + withdraw), then FIX a zkey/VK per circuit so
+# multiple notes share one verifier (the non-determinism fix — B.9 M8).
+echo "==> gen note A witnesses"
+cargo run -q -p opaq-common --bin gen_witness -- "$ROOT/circuits" >/dev/null
+echo "==> setup fixed zkeys (deposit, withdraw)"
+"$ROOT/scripts/groth16-setup.sh" deposit "$WORK/setup_deposit" 14
+"$ROOT/scripts/groth16-setup.sh" withdraw "$WORK/setup_withdraw" 16
 
-echo "==> build opaq (fresh VKs)"
+emit_vk() {  # embed the VK from a fixed-zkey setup dir
+  local c="$1"
+  cargo run -q --manifest-path "$VKMF" --bin emit_artifacts -- "$WORK/setup_$c" "$WORK" >/dev/null
+  mv -f "$WORK/vk.rs" "$PROG/src/vk_$c.rs"
+}
+emit_vk deposit; emit_vk withdraw
+
+prove_note() {  # circuit, inputs.json, out-blob — prove against the fixed zkey
+  local c="$1" inputs="$2" out="$3" dir="$WORK/prove_$(basename "$out")"
+  "$ROOT/scripts/groth16-prove-note.sh" "$c" "$WORK/setup_$c/circuit.zkey" "$inputs" "$dir"
+  cargo run -q --manifest-path "$VKMF" --bin emit_opaq_instruction -- \
+    "$c" "$dir" "$ROOT/circuits/e2e_values.json" "$out"
+}
+echo "==> prove note A (deposit + withdraw)"
+prove_note deposit  "$ROOT/circuits/deposit/inputs.json"  "$WORK/deposit.bin"
+prove_note withdraw "$ROOT/circuits/withdraw/inputs.json" "$WORK/withdraw.bin"
+
+# Note B: a second, distinct deposit (different blinding) proved against the SAME
+# deposit zkey — moves the root so the withdraw of A exercises stale-root (Test 4).
+echo "==> gen + prove note B (deposit)"
+OPAQ_BLINDING=222222222 cargo run -q -p opaq-common --bin gen_witness -- "$ROOT/circuits" >/dev/null
+prove_note deposit "$ROOT/circuits/deposit/inputs.json" "$WORK/deposit_b.bin"
+
+echo "==> build opaq (fixed VKs)"
 ( cd "$PROG" && cargo build-sbf --tools-version v1.54 )
 
 VPID=""; cleanup() { [ -n "$VPID" ] && kill "$VPID" 2>/dev/null || true; }; trap cleanup EXIT
@@ -59,4 +77,4 @@ solana program deploy "$PROG/target/deploy/opaq.so" \
 echo "==> run e2e"
 node "$ROOT/tests/m8_e2e.mjs" \
   "$PROG/target/deploy/opaq-keypair.json" "$WORK/mint.json" "$WORK/recipient.json" \
-  "$WORK/deposit.bin" "$WORK/withdraw.bin"
+  "$WORK/deposit.bin" "$WORK/deposit_b.bin" "$WORK/withdraw.bin"

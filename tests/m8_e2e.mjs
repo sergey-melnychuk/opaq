@@ -12,8 +12,8 @@ import {
 } from "@solana/spl-token";
 
 const kp = (p) => Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(p, "utf8"))));
-const [progPath, mintPath, recipPath, depositBin, withdrawBin] = process.argv.slice(2);
-const rpc = process.argv[7] || "http://127.0.0.1:8899";
+const [progPath, mintPath, recipPath, depositBin, depositBBin, withdrawBin] = process.argv.slice(2);
+const rpc = process.argv[8] || "http://127.0.0.1:8899";
 
 const programId = kp(progPath).publicKey;
 const mintKp = kp(mintPath);
@@ -52,7 +52,7 @@ async function main() {
   // --- SPL setup ---
   const mint = await createMint(conn, payer, payer.publicKey, null, 0, mintKp);
   const depositorAta = (await getOrCreateAssociatedTokenAccount(conn, payer, mint, payer.publicKey)).address;
-  await mintTo(conn, payer, mint, depositorAta, payer, AMOUNT);
+  await mintTo(conn, payer, mint, depositorAta, payer, 2n * AMOUNT); // fund notes A + B
 
   const vaultAuthority = pda([Buffer.from("vault"), mint.toBuffer()]);
   const vaultAta = (await getOrCreateAssociatedTokenAccount(conn, payer, mint, vaultAuthority, true)).address;
@@ -88,9 +88,12 @@ async function main() {
   });
   // Test 3 (forged input): claim a different amount than the proof was made for.
   await expectFail(depositIx(forgeAmount(depositData, 1 + 256 + 32)), "forged-amount deposit");
+  // Note A, then note B (distinct commitment, same fixed VK) — B moves the root
+  // so the later withdraw of A exercises stale-root tolerance (Test 4).
   await send(depositIx(depositData));
-  if (await bal(vaultAta) !== AMOUNT) throw new Error("vault balance after deposit != amount");
-  console.log(`  OK  deposit: vault holds ${AMOUNT}`);
+  await send(depositIx(fs.readFileSync(depositBBin)));
+  if (await bal(vaultAta) !== 2n * AMOUNT) throw new Error("vault != 2*amount after two deposits");
+  console.log(`  OK  deposit A + B: vault holds ${2n * AMOUNT}`);
 
   // --- withdraw (tag 2) ---
   const withdrawData = fs.readFileSync(withdrawBin);
@@ -111,18 +114,20 @@ async function main() {
   await expectFail(withdrawIx(forgeAmount(withdrawData, 1 + 256 + 96)), "forged-amount withdraw");
   // Recipient-binding: paying a token account not owned by the bound recipient.
   await expectFail(withdrawIx(withdrawData, depositorAta), "wrong-recipient withdraw");
+  // Withdraw note A against root-after-A, now STALE (B advanced the current root)
+  // but still in the ring buffer (Test 4). Note B's funds must stay put.
   await send(withdrawIx(withdrawData));
-  if (await bal(recipientAta) !== AMOUNT || await bal(vaultAta) !== 0n) {
+  if (await bal(recipientAta) !== AMOUNT || await bal(vaultAta) !== AMOUNT) {
     throw new Error("balances after withdraw incorrect");
   }
-  console.log(`  OK  withdraw: recipient got ${AMOUNT}, vault drained`);
+  console.log(`  OK  withdraw A (stale root): recipient got ${AMOUNT}, note B's ${AMOUNT} untouched`);
 
   // --- double-spend: same nullifier must be rejected ---
   await expectFail(withdrawIx(withdrawData), "double-spend (nullifier reuse)");
 
   console.log(
-    "\nM8 PASSED — round-trip + forged-input (deposit & withdraw) + wrong-recipient" +
-    " + double-spend all enforced on-chain."
+    "\nM8 PASSED — two-note round-trip + stale-root (Test 4) + note isolation" +
+    " + forged-input + wrong-recipient + double-spend, all on-chain."
   );
 }
 

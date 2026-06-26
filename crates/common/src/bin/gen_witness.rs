@@ -21,7 +21,9 @@ fn main() {
 
     // Deterministic note secrets (M1 fixtures, not real randomness).
     let spend_key = be32(987_654_321);
-    let blinding = be32(123_456_789);
+    let blinding = be32(
+        std::env::var("OPAQ_BLINDING").ok().and_then(|s| s.parse().ok()).unwrap_or(123_456_789),
+    );
     // Real test params come from env (the M8 e2e harness); otherwise dummy fixtures.
     let amount_u64: u64 = std::env::var("OPAQ_AMOUNT").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
     let amount = be32(amount_u64 as u128);
