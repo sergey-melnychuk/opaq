@@ -17,3 +17,5 @@ no-entrypoint = []
 [dependencies]
 solana-program = "3"
 borsh = "1"
+groth16-solana = "0.2"
+solana-poseidon = "3"
