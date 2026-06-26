@@ -1,0 +1,26 @@
+[package]
+name = "opaq-prover"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# M9: off-chain prover/note CLI (OPAQ.md B.7). Owns the client-side note
+# lifecycle — generate secrets, derive the commitment, encrypt the note at rest,
+# and later derive the nullifier for a withdraw — plus the A.8/A.12 privacy
+# warnings. Proof generation and tx submission reuse the existing pipeline
+# (scripts/groth16-prove-note.sh + tests/*.mjs); this binary owns the crypto.
+[[bin]]
+name = "opaq"
+path = "src/main.rs"
+
+[dependencies]
+opaq-common = { path = "../common" }
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+ark-std = "0.5"
+rand = "0.8"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+serde_json = "1"
+hex = "0.4"
+bs58 = "0.5"

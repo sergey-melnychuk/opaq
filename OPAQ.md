@@ -798,7 +798,15 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
           the structural prerequisite for a real (secure) ceremony (B.6 blocker).
           Remaining: Test 5 (ring-buffer overflow — 33 deposits + evicted-root
           withdraw); heavy, and the ring buffer is already unit-tested in M4.
-[ ] M9  — Prover CLI polished: note encryption, clean error messages, recipient-history warning (per A.8)
+[~] M9  — `opaq` prover/note CLI (crates/prover): deposit generates secrets +
+          derives the commitment + writes an ENCRYPTED note (Argon2id +
+          ChaCha20-Poly1305) + emits the circuit inputs.json for the real note;
+          withdraw decrypts + derives the nullifier. Both surface the A.12
+          amount-fingerprinting and A.8 recipient-history warnings; clean errors
+          (e.g. wrong-passphrase). Remaining polish: auto-prove + auto-submit
+          (currently prints public inputs / hands off to the pipeline), RPC
+          merkle-path reconstruction for withdraw (overlaps M10), and an actual
+          RPC recipient-history lookup (the warning is currently advisory).
 [ ] M10 — Test 7 (zero-infra read path) verified from a genuinely clean machine
 [ ] M11 — Deployed and demoed on Solana devnet (not just local validator)
 ```

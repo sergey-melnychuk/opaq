@@ -9,7 +9,7 @@ resolver = "2"
 # workspace graph, and the host crates here pull solana 3.x deps that require
 # edition2024 (unsupported by the SBF platform-tools cargo 1.84). Isolating the
 # SBF program lets it pin the edition-2021-friendly solana 2.x line.
-members = ["crates/common"]
+members = ["crates/common", "crates/prover"]
 
 [workspace.package]
 edition = "2021"
