@@ -677,8 +677,13 @@ the deposit proof **verifies** and a tampered proof is **rejected**. Conversion
 conventions (now settled, verified against `solana-bn254`'s PodG1/PodG2):
 big-endian; G1 = x‖y with the point at infinity as all-zeros and Z-normalization;
 G2 in **EIP-197 imaginary-first** order (x_c1‖x_c0‖y_c1‖y_c0); **proof_a's y
-negated**. Remaining M3: the same verify inside an SBF program on
-`solana-test-validator`.
+negated**. **On-chain leg also passing** (`programs/groth16-verify-check` +
+`scripts/m3-onchain.sh`): the deposit VK is embedded as Rust consts and the same
+`groth16-solana` verify runs in the SBF VM on `solana-test-validator` —
+**accepts the valid proof, rejects a tampered one** via real `sol_alt_bn128`
+syscalls. **M3 done** (modulo the insecure ceremony below). The hand-built
+UltraHonk verifier B.6 originally feared is moot — Groth16 verification is the
+audited `groth16-solana` crate, no pairing math hand-rolled.
 
 > **SECURITY CAVEAT — insecure proving ceremony.** `scripts/groth16-prove.sh`
 > (via the upstream `run_circuit.sh`) generates powers-of-tau with **no
