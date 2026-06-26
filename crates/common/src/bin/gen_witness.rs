@@ -59,9 +59,14 @@ fn main() {
     );
 
     // --- withdraw/Prover.toml ---
-    // Simple valid path: leaf at index 0, all-left, zero siblings. The root is
-    // whatever this folds to — a perfectly valid membership witness for M1.
-    let siblings = [[0u8; 32]; TREE_DEPTH];
+    // Real empty-tree state: leaf at index 0, all-left path, siblings = the
+    // empty-subtree hashes (zero_hashes), NOT all-zero. This makes the proof's
+    // merkle_root equal the root CommitmentTree produces after inserting the
+    // commitment at index 0 (cross-checked by the M4 tree tests) — so the
+    // circuit and the on-chain tree agree (needed for M6/M7).
+    let siblings = opaq_common::tree::zero_hashes(&|a: &[u8; 32], b: &[u8; 32]| {
+        opaq_common::poseidon_hash2_be(a, b)
+    });
     let right = [false; TREE_DEPTH];
     let merkle_root = merkle_root_be(commitment, &siblings, &right);
 

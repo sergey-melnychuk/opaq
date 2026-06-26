@@ -6,6 +6,9 @@
 use light_poseidon::{Poseidon, PoseidonBytesHasher};
 use ark_bn254::Fr;
 
+pub mod nullifier;
+pub mod tree;
+
 /// Original Poseidon (Circom BN254 params) over N 32-byte big-endian field
 /// elements, returning a 32-byte big-endian field element — matching the
 /// circuit's `poseidon::poseidon::bn254::hash_N` and the Solana `sol_poseidon`
