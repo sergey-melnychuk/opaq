@@ -25,6 +25,7 @@ use solana_program::{
 
 mod tree_consts;
 mod vk_deposit;
+mod vk_withdraw;
 use tree_consts::{EMPTY_ROOT, ZEROS};
 
 pub const TREE_DEPTH: usize = 24;
@@ -32,6 +33,7 @@ pub const ROOT_HISTORY: usize = 32;
 
 pub const TREE_SEED: &[u8] = b"tree";
 pub const NULLIFIER_SEED: &[u8] = b"nullifiers";
+pub const VAULT_SEED: &[u8] = b"vault"; // vault token-account authority PDA
 
 // Custom error codes (ProgramError::Custom).
 pub const E_PROOF_INVALID: u32 = 1;
@@ -46,6 +48,15 @@ const DEPOSIT_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     vk_gamme_g2: vk_deposit::VK_GAMME_G2,
     vk_delta_g2: vk_deposit::VK_DELTA_G2,
     vk_ic: &vk_deposit::VK_IC,
+};
+
+const WITHDRAW_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
+    nr_pubinputs: 5,
+    vk_alpha_g1: vk_withdraw::VK_ALPHA_G1,
+    vk_beta_g2: vk_withdraw::VK_BETA_G2,
+    vk_gamme_g2: vk_withdraw::VK_GAMME_G2,
+    vk_delta_g2: vk_withdraw::VK_DELTA_G2,
+    vk_ic: &vk_withdraw::VK_IC,
 };
 
 /// Original Poseidon hash of two field elements (== the circuit's hash_2 and
@@ -132,6 +143,49 @@ fn tree_is_known_root(data: &[u8], root: &[u8; 32]) -> bool {
         && (0..ROOT_HISTORY).any(|j| &data[OFF_ROOTS + j * 32..OFF_ROOTS + j * 32 + 32] == root)
 }
 
+// NullifierSet borsh layout: count u64 [0..8] | vec len u32 [8..12] | nullifiers [12..].
+const OFF_NULLIFIERS: usize = 12;
+
+fn nullifier_contains(data: &[u8], n: &[u8; 32]) -> bool {
+    let count = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
+    (0..count).any(|i| &data[OFF_NULLIFIERS + i * 32..OFF_NULLIFIERS + i * 32 + 32] == n)
+}
+
+/// Append a nullifier: grow the account by 32 bytes (rent funded by `payer` via a
+/// System Transfer), then write the entry and bump count + vec length (zero-copy).
+fn nullifier_append<'a>(
+    payer: &AccountInfo<'a>,
+    nf: &AccountInfo<'a>,
+    system: &AccountInfo<'a>,
+    nullifier: [u8; 32],
+) -> ProgramResult {
+    let count = u64::from_le_bytes(nf.data.borrow()[0..8].try_into().unwrap());
+    let new_len = OFF_NULLIFIERS + (count as usize + 1) * 32;
+
+    let needed = Rent::get()?.minimum_balance(new_len);
+    let have = nf.lamports();
+    if needed > have {
+        let mut d = Vec::with_capacity(12);
+        d.extend_from_slice(&2u32.to_le_bytes()); // SystemInstruction::Transfer
+        d.extend_from_slice(&(needed - have).to_le_bytes());
+        let ix = Instruction {
+            program_id: Pubkey::default(),
+            accounts: vec![AccountMeta::new(*payer.key, true), AccountMeta::new(*nf.key, false)],
+            data: d,
+        };
+        invoke(&ix, &[payer.clone(), nf.clone(), system.clone()])?;
+    }
+    nf.resize(new_len)?;
+
+    let mut data = nf.data.borrow_mut();
+    let off = OFF_NULLIFIERS + count as usize * 32;
+    data[off..off + 32].copy_from_slice(&nullifier);
+    let count2 = count + 1;
+    data[0..8].copy_from_slice(&count2.to_le_bytes());
+    data[8..12].copy_from_slice(&(count2 as u32).to_le_bytes());
+    Ok(())
+}
+
 /// Append-only nullifier set (B.2), grown via realloc on withdraw.
 #[derive(BorshSerialize, BorshDeserialize)]
 pub struct NullifierSet {
@@ -155,6 +209,7 @@ pub fn process_instruction(
     match tag {
         0 => initialize_pool(program_id, accounts),
         1 => deposit(program_id, accounts, args),
+        2 => withdraw(program_id, accounts, args),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -227,7 +282,9 @@ fn spl_transfer<'a>(
         accounts: vec![
             AccountMeta::new(*source.key, false),
             AccountMeta::new(*dest.key, false),
-            AccountMeta::new_readonly(*authority.key, signer_seeds.is_empty()),
+            // authority signs either as a real tx signer (deposit) or via the
+            // vault PDA in invoke_signed (withdraw) — signer in the meta both ways.
+            AccountMeta::new_readonly(*authority.key, true),
         ],
         data,
     };
@@ -328,5 +385,92 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progra
     let leaf_index = tree_insert(&mut tree_ai.data.borrow_mut(), commitment)?;
 
     msg!("opaq: deposit ok, leaf_index={}", leaf_index);
+    Ok(())
+}
+
+/// Withdraw: verify the proof, check the root is recent, enforce the nullifier,
+/// and release SPL from the vault to the recipient (vault PDA signs).
+/// Accounts: [payer (signer,w), vault_authority, vault_token (w),
+///            recipient_token (w), commitment_tree, nullifier_set (w),
+///            token_program, system_program]
+/// Args (392): proof_a(64) proof_b(128) proof_c(64) merkle_root(32) nullifier(32)
+///             token_id(32) amount(8 LE) recipient(32)
+#[inline(never)]
+fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
+    if args.len() != 64 + 128 + 64 + 32 + 32 + 32 + 8 + 32 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let proof_a: [u8; 64] = args[0..64].try_into().unwrap();
+    let proof_b: [u8; 128] = args[64..192].try_into().unwrap();
+    let proof_c: [u8; 64] = args[192..256].try_into().unwrap();
+    let merkle_root: [u8; 32] = args[256..288].try_into().unwrap();
+    let nullifier: [u8; 32] = args[288..320].try_into().unwrap();
+    let token_id: [u8; 32] = args[320..352].try_into().unwrap();
+    let amount = u64::from_le_bytes(args[352..360].try_into().unwrap());
+    let recipient: [u8; 32] = args[360..392].try_into().unwrap();
+
+    // Public inputs in circuit order (B.4.2). recipient is bound so the submitter
+    // can't redirect funds; token_id/amount are bound to the released asset.
+    let public = [
+        merkle_root,
+        nullifier,
+        to_field(&token_id),
+        be32(amount),
+        to_field(&recipient),
+    ];
+    let mut verifier = Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public, &WITHDRAW_VK)
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+    verifier
+        .verify()
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+
+    let iter = &mut accounts.iter();
+    let payer = next_account_info(iter)?;
+    let vault_authority = next_account_info(iter)?;
+    let vault_token = next_account_info(iter)?;
+    let recipient_token = next_account_info(iter)?;
+    let tree_ai = next_account_info(iter)?;
+    let nullifier_ai = next_account_info(iter)?;
+    let token_program = next_account_info(iter)?;
+    let system = next_account_info(iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
+    let (nf_pda, _) = Pubkey::find_program_address(&[NULLIFIER_SEED], program_id);
+    let (vault_token_pda, _) =
+        Pubkey::find_program_address(&[VAULT_TOKEN_SEED, &token_id], program_id);
+    let (vault_auth_pda, vault_bump) =
+        Pubkey::find_program_address(&[VAULT_SEED, &token_id], program_id);
+    if tree_ai.key != &tree_pda
+        || nullifier_ai.key != &nf_pda
+        || vault_token.key != &vault_token_pda
+        || vault_authority.key != &vault_auth_pda
+    {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    // Root must be in the recent ring buffer (proofs may target a moved root).
+    if !tree_is_known_root(&tree_ai.data.borrow(), &merkle_root) {
+        return Err(ProgramError::Custom(E_UNKNOWN_ROOT));
+    }
+    // Double-spend check, then record the nullifier.
+    if nullifier_contains(&nullifier_ai.data.borrow(), &nullifier) {
+        return Err(ProgramError::Custom(E_ALREADY_SPENT));
+    }
+    nullifier_append(payer, nullifier_ai, system, nullifier)?;
+
+    // Release tokens vault -> recipient, signed by the vault authority PDA.
+    spl_transfer(
+        token_program,
+        vault_token,
+        recipient_token,
+        vault_authority,
+        amount,
+        &[&[VAULT_SEED, &token_id, &[vault_bump]]],
+    )?;
+
+    msg!("opaq: withdraw ok");
     Ok(())
 }
