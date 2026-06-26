@@ -1,0 +1,22 @@
+# Standalone workspace (own lockfile). Build: cargo build-sbf --tools-version v1.54
+[workspace]
+
+[package]
+name = "groth16-verify-check"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# M3 (OPAQ.md B.6): standalone on-chain Groth16 verifier — embeds the deposit
+# circuit's VK and verifies an instruction-data proof via groth16-solana
+# (alt_bn128 syscalls). Confirms the off-chain conversion works in the real SBF
+# VM: accepts a valid proof, rejects a tampered one. Throwaway isolation test.
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+solana-program = "3"
+groth16-solana = "0.2"
