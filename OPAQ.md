@@ -789,16 +789,15 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
 [x] M5  — NullifierSet account: insert/check logic unit-tested in isolation
 [x] M6  — deposit instruction wired end-to-end on local validator (Test 1, steps 1-3)
 [x] M7  — withdraw instruction wired end-to-end on local validator (Test 1, steps 4-5)
-[~] M8  — Tests 1,2,3 + recipient-binding PASS on validator (round-trip,
-          double-spend, forged-amount deposit & withdraw, wrong-recipient).
-          Tests 4-6 (stale-root, ring-overflow, multi-token) remain — they need
-          MULTIPLE proofs verified against ONE embedded VK, which the current
-          pipeline can't do: the snarkjs ceremony is NON-DETERMINISTIC (each
-          `groth16-prove` run yields a different VK; confirmed by sha256). The
-          e2e works because it regenerates VK+proof together per run. Fix before
-          Tests 4-6 (and before any real deploy): run the Groth16 setup ONCE to
-          fix the zkey/VK, then prove every note against it — i.e. a proper
-          (and secure) ceremony, which is the B.6 production blocker anyway.
+[x] M8  — Tests 1,2,3,4,6 + recipient-binding PASS on validator: round-trip,
+          double-spend (T2), forged-amount deposit & withdraw (T3), stale-root
+          tolerance (T4), multi-token vault isolation (T6), wrong-recipient.
+          Unblocked by splitting Groth16 setup (fixed zkey/VK, once) from proving
+          (per note) — scripts/groth16-setup.sh + groth16-prove-note.sh — so many
+          notes verify against one embedded VK. That setup/prove split is also
+          the structural prerequisite for a real (secure) ceremony (B.6 blocker).
+          Remaining: Test 5 (ring-buffer overflow — 33 deposits + evicted-root
+          withdraw); heavy, and the ring buffer is already unit-tested in M4.
 [ ] M9  — Prover CLI polished: note encryption, clean error messages, recipient-history warning (per A.8)
 [ ] M10 — Test 7 (zero-infra read path) verified from a genuinely clean machine
 [ ] M11 — Deployed and demoed on Solana devnet (not just local validator)
