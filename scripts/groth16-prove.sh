@@ -5,6 +5,11 @@
 # setup/prove/verify. This is the Phase 1 proving path (Groth16, not UltraHonk).
 #
 # Usage: scripts/groth16-prove.sh [circuit-dir]   (default: circuits/deposit)
+#
+# WARNING: the upstream run_circuit.sh generates powers-of-tau with NO
+# contribution (trivial toxic waste) — the resulting vk is insecure and
+# forgeable. Fine for testing the verifier; a real ceremony is required before
+# any deployment. See OPAQ.md B.6 "SECURITY CAVEAT".
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

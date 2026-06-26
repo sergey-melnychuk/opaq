@@ -668,8 +668,26 @@ matching the circuits' public inputs exactly. Vendored as a patch + setup script
 in `tools/noir-groth16/`; run via `scripts/groth16-prove.sh <circuit>`.
 Caveat: unaudited code requiring re-port on each Noir upgrade — a minimal owned
 ACIR->R1CS (only `AssertZero` + `RANGE` are needed) stays the cleaner long-term
-option. **Next (M3):** on-chain verifier consuming these snarkjs BN254 proofs via
-Light Protocol's `groth16-solana` (`alt_bn128` syscalls).
+option.
+
+**M3 (in progress): Groth16 verification via `groth16-solana` — off-chain leg
+passing.** `crates/groth16-verify` converts snarkjs (BN254) proofs/vk to
+`groth16-solana`'s byte layout and verifies with the same crate used on-chain:
+the deposit proof **verifies** and a tampered proof is **rejected**. Conversion
+conventions (now settled, verified against `solana-bn254`'s PodG1/PodG2):
+big-endian; G1 = x‖y with the point at infinity as all-zeros and Z-normalization;
+G2 in **EIP-197 imaginary-first** order (x_c1‖x_c0‖y_c1‖y_c0); **proof_a's y
+negated**. Remaining M3: the same verify inside an SBF program on
+`solana-test-validator`.
+
+> **SECURITY CAVEAT — insecure proving ceremony.** `scripts/groth16-prove.sh`
+> (via the upstream `run_circuit.sh`) generates powers-of-tau with **no
+> contribution** — trivial toxic waste, so the resulting vk is degenerate
+> (`vk_alpha_1` = generator, some `IC` points at infinity) and **anyone can
+> forge proofs**. Fine for wiring/testing the verifier, but a **real
+> Phase 1.5/production ceremony is mandatory before deployment**. The infinity
+> `IC` points are an artifact of the trivial setup, not a circuit bug — a proper
+> ceremony yields non-degenerate `IC` that bind every public input.
 
 [jamesbachini/Noir-Groth16]: https://github.com/jamesbachini/Noir-Groth16
 
