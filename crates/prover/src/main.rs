@@ -21,7 +21,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use opaq_common::{be32, poseidon_be, to_field_be};
+use opaq_common::{be32, field_hex, poseidon_be, to_field_be, tree};
 use rand::RngCore;
 use serde_json::Value;
 
@@ -103,14 +103,81 @@ fn withdraw(f: &HashMap<String, String>) -> R {
     println!("  token_id   {}", bs58::encode(mint).into_string());
     println!("  amount     {amount}");
     println!("  recipient  {}", bs58::encode(recipient).into_string());
-    println!(
-        "  merkle_root + path: reconstruct from on-chain tree state for leaf_index {} \
-         (zero-infra read path, M10)",
-        note["leaf_index"]
-    );
+
+    // Zero-infra read path (M10 / Test 7): given the ordered commitment list
+    // harvested from chain over plain RPC (see tests/read_path.mjs), rebuild this
+    // note's Merkle authentication path locally — no indexer, no special access.
+    if let Some(leaves_path) = f.get("leaves") {
+        let leaves = load_leaves(leaves_path)?;
+        let leaf_index = leaves
+            .iter()
+            .position(|c| *c == commitment)
+            .ok_or("note commitment not found in on-chain leaves (wrong pool/passphrase?)")?
+            as u64;
+
+        let blinding = hex32(note["blinding"].as_str().ok_or("note missing blinding")?)?;
+        let zeros = tree::zero_hashes(&poseidon2);
+        let (siblings, right, merkle_root) =
+            tree::reconstruct_path(&poseidon2, &zeros, &leaves, leaf_index);
+
+        let token_id = to_field_be(&mint);
+        let recipient_field = to_field_be(&recipient);
+        println!("  leaf_index {leaf_index} (located in on-chain leaf set)");
+        println!("  merkle_root 0x{}", hex::encode(merkle_root));
+
+        if let Some(p) = f.get("inputs-out") {
+            let path: Vec<String> = siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect();
+            let idx: Vec<String> = right.iter().map(|b| b.to_string()).collect();
+            let inputs = format!(
+                "{{\"merkle_root\":\"{}\",\"nullifier\":\"{}\",\"token_id\":\"{}\",\
+                 \"amount\":\"{}\",\"recipient\":\"{}\",\"spend_key\":\"{}\",\
+                 \"blinding_factor\":\"{}\",\"merkle_path\":[{}],\
+                 \"merkle_path_indices\":[{}]}}",
+                field_hex(&merkle_root),
+                field_hex(&nullifier),
+                field_hex(&token_id),
+                field_hex(&be32(amount as u128)),
+                field_hex(&recipient_field),
+                field_hex(&spend_key),
+                field_hex(&blinding),
+                path.join(","),
+                idx.join(","),
+            );
+            std::fs::write(p, &inputs).map_err(|e| format!("write {p}: {e}"))?;
+            println!("withdraw circuit inputs -> {p}");
+        }
+    } else {
+        println!(
+            "  merkle_root + path: pass --leaves <file> (the RPC-harvested commitment \
+             list) to reconstruct locally — zero-infra read path, M10"
+        );
+    }
+
     warn::recipient(&recipient);
     warn::amount(amount);
     Ok(())
+}
+
+/// 2-input Poseidon over big-endian field elements — the tree's hash, proven
+/// byte-identical to the circuit + on-chain syscall in M0.
+fn poseidon2(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    poseidon_be(&[*a, *b])
+}
+
+/// Load the ordered commitment (leaf) list produced by the RPC read path:
+/// a JSON array of 32-byte hex strings, index `i` == on-chain `leaf_index` `i`.
+fn load_leaves(path: &str) -> Result<Vec<[u8; 32]>, String> {
+    let v: Value = serde_json::from_slice(
+        &std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?,
+    )
+    .map_err(|_| "leaves file is not valid JSON")?;
+    let arr = v.as_array().ok_or("leaves file must be a JSON array of hex commitments")?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, e) in arr.iter().enumerate() {
+        let s = e.as_str().ok_or_else(|| format!("leaf {i} is not a string"))?;
+        out.push(hex32(s)?);
+    }
+    Ok(out)
 }
 
 // --- helpers ---

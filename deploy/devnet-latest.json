@@ -1,0 +1,7 @@
+{
+  "rpc": "https://api.devnet.solana.com",
+  "program_id": "6aKpMhuxQe9jVDyzbuBzKPNwUbUf3CTb2G9ByHbn7KFo",
+  "deployed_at": "2026-06-26T17:50:45Z",
+  "demo_mint_hex": "8521ba3cd11a016400db1cf8319c63fc1640d1bc55cd110ce9aa549f6cab0893",
+  "note": "Insecure test-ceremony VKs (OPAQ.md B.6). Re-run scripts/m11-devnet.sh to redeploy with fresh proofs."
+}

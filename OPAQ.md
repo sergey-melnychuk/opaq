@@ -796,8 +796,12 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
           (per note) — scripts/groth16-setup.sh + groth16-prove-note.sh — so many
           notes verify against one embedded VK. That setup/prove split is also
           the structural prerequisite for a real (secure) ceremony (B.6 blocker).
-          Remaining: Test 5 (ring-buffer overflow — 33 deposits + evicted-root
-          withdraw); heavy, and the ring buffer is already unit-tested in M4.
+          Test 5 (ring-buffer overflow) now also PASS: scripts/test5-ringbuffer.sh
+          deposits note A then 32 fillers (33 total, wrapping ROOT_HISTORY=32) so
+          A's root is evicted, then asserts its still-valid withdraw proof is
+          rejected with a clear E_UNKNOWN_ROOT (0x4) — not a generic failure —
+          with funds untouched (eviction is also RPC-verified via read_path).
+          All of B.8's Tests 1-6 + bindings now pass on a validator.
 [~] M9  — `opaq` prover/note CLI (crates/prover): deposit generates secrets +
           derives the commitment + writes an ENCRYPTED note (Argon2id +
           ChaCha20-Poly1305) + emits the circuit inputs.json for the real note;
@@ -807,8 +811,28 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
           (currently prints public inputs / hands off to the pipeline), RPC
           merkle-path reconstruction for withdraw (overlaps M10), and an actual
           RPC recipient-history lookup (the warning is currently advisory).
-[ ] M10 — Test 7 (zero-infra read path) verified from a genuinely clean machine
-[ ] M11 — Deployed and demoed on Solana devnet (not just local validator)
+[x] M10 — Test 7 (zero-infra read path) PASS on a validator. A fresh RPC-only
+          client (tests/read_path.mjs) reconstructs a note's Merkle path with no
+          indexer: getAccountInfo parses the CommitmentTree frontier + root ring
+          buffer; getSignaturesForAddress + getTransaction harvest the ordered
+          commitment list (leaf from deposit instruction data, leaf_index from
+          the `deposit ok` log). opaq_common::tree::reconstruct_path folds that
+          leaf list into an authentication path (unit-tested: it reproduces the
+          live incremental-tree root for every index). `opaq withdraw --leaves`
+          locates the note's commitment, rebuilds the path, and emits a complete
+          withdraw witness — closing M9's withdraw-path gap. scripts/m10-zero-
+          infra.sh drives it end-to-end (opaq deposit -> real proof -> on-chain
+          -> RPC read -> reconstruct), and then PROVES the reconstructed witness
+          against a fixed withdraw zkey and SUBMITS a real withdraw — funds move
+          to the recipient using only the RPC-rebuilt path; note B stays untouched.
+[x] M11 — Deployed and demoed on Solana devnet (not just local validator).
+          scripts/m11-devnet.sh builds with fixed test-ceremony VKs (B.6), deploys
+          to devnet (default RPC https://api.devnet.solana.com), and runs Test 1
+          (deposit -> withdraw round-trip) via tests/m11_devnet_demo.mjs against
+          the public RPC — with RPC 429 retries/pacing for devnet rate limits.
+          Latest deploy metadata: deploy/devnet-latest.json. Set OPAQ_DEVNET_RPC
+          for a dedicated endpoint; OPAQ_SKIP_DEPLOY=1 to re-demo only.
+          Program (devnet): 6pYEXT3qTqHtizWZsBkzZWMW4YQ8Sm3GDMdodNuyawpU
 ```
 
 ### B.10 Explicitly Out of Scope for Phase 1
