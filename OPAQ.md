@@ -780,16 +780,16 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
 ### B.9 Milestone Checklist (suggested order, not strict gates)
 
 ```
-[ ] M0  — Poseidon parity test passes (B.0), incl. to_field(32-byte) and empty-tree zeros parity
-[ ] M0.5— Proof-system CU feasibility settled (B.6): Honk verifier fits one tx's compute budget, OR Groth16 chosen as Phase 1 fallback — decided BEFORE freezing public-input layout
-[ ] M1  — deposit.nr compiles, proves, verifies locally (bb verify, no Solana yet)
-[ ] M2  — withdraw.nr compiles, proves, verifies locally
-[ ] M3  — BN254 verifier standalone test passes (B.6) — accepts valid, rejects invalid proof
-[ ] M4  — CommitmentTree account: insert logic unit-tested in isolation (no SPL, no proof, just tree math)
-[ ] M5  — NullifierSet account: insert/check logic unit-tested in isolation
-[ ] M6  — deposit instruction wired end-to-end on local validator (Test 1, steps 1-3)
-[ ] M7  — withdraw instruction wired end-to-end on local validator (Test 1, steps 4-5)
-[ ] M8  — Tests 2-6 pass (incl. Test 3 recipient-binding variant and Test 3b deposit-binding guard)
+[x] M0  — Poseidon parity test passes (B.0), incl. to_field(32-byte) and empty-tree zeros parity
+[x] M0.5— Proof-system CU feasibility settled (B.6): Honk verifier fits one tx's compute budget, OR Groth16 chosen as Phase 1 fallback — decided BEFORE freezing public-input layout
+[x] M1  — deposit.nr compiles, proves, verifies locally (bb verify, no Solana yet)
+[x] M2  — withdraw.nr compiles, proves, verifies locally
+[x] M3  — BN254 verifier standalone test passes (B.6) — accepts valid, rejects invalid proof
+[x] M4  — CommitmentTree account: insert logic unit-tested in isolation (no SPL, no proof, just tree math)
+[x] M5  — NullifierSet account: insert/check logic unit-tested in isolation
+[x] M6  — deposit instruction wired end-to-end on local validator (Test 1, steps 1-3)
+[x] M7  — withdraw instruction wired end-to-end on local validator (Test 1, steps 4-5)
+[~] M8  — Test 1 (round-trip) + Test 2 (double-spend) PASS on validator; Tests 3-6 (forged-input, stale-root, ring-overflow, multi-token) remain
 [ ] M9  — Prover CLI polished: note encryption, clean error messages, recipient-history warning (per A.8)
 [ ] M10 — Test 7 (zero-infra read path) verified from a genuinely clean machine
 [ ] M11 — Deployed and demoed on Solana devnet (not just local validator)
