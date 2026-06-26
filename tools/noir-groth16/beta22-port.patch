@@ -1,0 +1,1135 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index aebf010..54b77bf 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -13,9 +13,9 @@ license = "MIT OR Apache-2.0"
+ version = "0.1.0"
+ 
+ [workspace.dependencies]
+-acir = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "acir" }
+-acvm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "acvm" }
+-bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "bn254_blackbox_solver" }
++acir = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "acir" }
++acvm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "acvm" }
++bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "bn254_blackbox_solver" }
+ clap = { version = "4.5", features = ["derive"] }
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
+diff --git a/crates/noir-acir/src/lib.rs b/crates/noir-acir/src/lib.rs
+index c95c6b3..7ba3ae7 100644
+--- a/crates/noir-acir/src/lib.rs
++++ b/crates/noir-acir/src/lib.rs
+@@ -4,7 +4,101 @@ use acir::{
+     circuit::{Circuit, Opcode, Program},
+     FieldElement,
+ };
++use acir::circuit::brillig::{BrilligInputs, BrilligOutputs};
++use acir::native_types::Witness;
+ use base64::Engine;
++
++/// Maximum witness index referenced anywhere in `circuit`.
++///
++/// Replaces `Circuit::current_witness_index`, removed from acir in noir
++/// beta.22. Mirrors the witness-folding acvm itself uses (private/public/return
++/// parameters + every opcode), and is a safe upper bound for wire allocation:
++/// any witness referenced by a constraint is <= this value. For circuits emitted
++/// by nargo there are no gaps, so this equals the old field exactly.
++pub fn max_witness_index(circuit: &Circuit<FieldElement>) -> u32 {
++    fn upd(max: &mut u32, w: Witness) {
++        let i = w.witness_index();
++        if i > *max {
++            *max = i;
++        }
++    }
++    fn fold_expr(max: &mut u32, expr: &acir::native_types::Expression<FieldElement>) {
++        for t in &expr.mul_terms {
++            upd(max, t.1);
++            upd(max, t.2);
++        }
++        for t in &expr.linear_combinations {
++            upd(max, t.1);
++        }
++    }
++
++    let mut max = 0u32;
++    for w in &circuit.private_parameters {
++        upd(&mut max, *w);
++    }
++    for w in &circuit.public_parameters.0 {
++        upd(&mut max, *w);
++    }
++    for w in &circuit.return_values.0 {
++        upd(&mut max, *w);
++    }
++    for opcode in &circuit.opcodes {
++        match opcode {
++            Opcode::AssertZero(expr) => fold_expr(&mut max, expr),
++            Opcode::BlackBoxFuncCall(call) => {
++                for w in call.get_input_witnesses() {
++                    upd(&mut max, w);
++                }
++                for w in call.get_outputs_vec() {
++                    upd(&mut max, w);
++                }
++            }
++            Opcode::MemoryOp { op, .. } => {
++                upd(&mut max, op.index);
++                upd(&mut max, op.value);
++            }
++            Opcode::MemoryInit { init, .. } => {
++                for w in init {
++                    upd(&mut max, *w);
++                }
++            }
++            Opcode::BrilligCall { inputs, outputs, predicate, .. } => {
++                fold_expr(&mut max, predicate);
++                for inp in inputs {
++                    match inp {
++                        BrilligInputs::Single(e) => fold_expr(&mut max, e),
++                        BrilligInputs::Array(es) => {
++                            for e in es {
++                                fold_expr(&mut max, e);
++                            }
++                        }
++                        BrilligInputs::MemoryArray(_) => {}
++                    }
++                }
++                for out in outputs {
++                    match out {
++                        BrilligOutputs::Simple(w) => upd(&mut max, *w),
++                        BrilligOutputs::Array(ws) => {
++                            for w in ws {
++                                upd(&mut max, *w);
++                            }
++                        }
++                    }
++                }
++            }
++            Opcode::Call { inputs, outputs, predicate, .. } => {
++                fold_expr(&mut max, predicate);
++                for w in inputs {
++                    upd(&mut max, *w);
++                }
++                for w in outputs {
++                    upd(&mut max, *w);
++                }
++            }
++        }
++    }
++    max
++}
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ use thiserror::Error;
+@@ -157,7 +251,7 @@ impl Artifact {
+ 
+         ParsedSummary {
+             opcode_count: circuit.opcodes.len(),
+-            witness_count: circuit.current_witness_index + 1,
++            witness_count: max_witness_index(circuit) + 1,
+             opcode_variants: variants.into_iter().collect(),
+         }
+     }
+diff --git a/crates/noir-r1cs/src/lib.rs b/crates/noir-r1cs/src/lib.rs
+index 222bed3..1ba0ae1 100644
+--- a/crates/noir-r1cs/src/lib.rs
++++ b/crates/noir-r1cs/src/lib.rs
+@@ -157,7 +157,7 @@ type AcirOpcode = Opcode<FieldElement>;
+ type AcirExpression = Expression<FieldElement>;
+ type AcirFunctionInput = FunctionInput<FieldElement>;
+ type AcirBlackBoxFuncCall = BlackBoxFuncCall<FieldElement>;
+-type AcirMemOp = MemOp<FieldElement>;
++type AcirMemOp = MemOp;
+ 
+ pub fn lower_program(program: &AcirProgram) -> Result<R1csSystem, R1csError> {
+     compile_r1cs(program)
+@@ -378,8 +378,9 @@ impl<'a> LoweringContext<'a> {
+         options: LoweringOptions,
+         instance_witness: Option<&'a [FieldElement]>,
+     ) -> Self {
++        let max_witness = noir_acir::max_witness_index(circuit);
+         let mut wire_map = BTreeMap::new();
+-        for witness in 0..=circuit.current_witness_index {
++        for witness in 0..=max_witness {
+             wire_map.insert(witness, witness + 1);
+         }
+ 
+@@ -392,8 +393,8 @@ impl<'a> LoweringContext<'a> {
+             options,
+             field_modulus_le_bytes: bn254_modulus_le_bytes(),
+             wire_map,
+-            next_virtual_witness_index: circuit.current_witness_index + 1,
+-            next_wire: circuit.current_witness_index + 2,
++            next_virtual_witness_index: max_witness + 1,
++            next_wire: max_witness + 2,
+             next_memory_block_id: next_memory_block_id(circuit),
+             allocated_intermediate_wires: BTreeSet::new(),
+             constrained_wires: BTreeSet::new(),
+@@ -667,7 +668,7 @@ impl<'a> LoweringContext<'a> {
+             }
+         }
+ 
+-        for witness_index in 0..=callee.current_witness_index {
++        for witness_index in 0..=noir_acir::max_witness_index(callee) {
+             witness_map
+                 .entry(witness_index)
+                 .or_insert_with(|| self.allocate_virtual_witness());
+@@ -1082,285 +1083,19 @@ impl<'a> LoweringContext<'a> {
+ 
+     fn lower_memory_op(
+         &mut self,
+-        block_id: BlockId,
+-        op: &AcirMemOp,
++        _block_id: BlockId,
++        _op: &AcirMemOp,
+         opcode_index: usize,
+     ) -> Result<(), R1csError> {
+-        let entries = self
+-            .memory_blocks
+-            .get(&block_id.0)
+-            .cloned()
+-            .ok_or_else(|| R1csError::InvalidProgramInvariant {
+-                details: format!(
+-                    "memory block {} used before initialization at opcode index {}",
+-                    block_id.0, opcode_index
+-                ),
+-            })?;
+-
+-        if entries.is_empty() {
+-            return self.unsupported_opcode(
+-                "MemoryOp",
+-                opcode_index,
+-                "dynamic MemoryOp over empty memory blocks is unsupported".to_string(),
+-            );
+-        }
+-
+-        let operation = canonicalize_expression(&op.operation);
+-        self.ensure_expression_witnesses_in_range(&operation, "MemoryOp operation")?;
+-        let op_wire =
+-            self.bind_expression_to_new_wire(&operation, opcode_index, "MemoryOp operation")?;
+-        self.enforce_boolean_wire(op_wire)?;
+-
+-        let index_expr = canonicalize_expression(&op.index);
+-        self.ensure_expression_witnesses_in_range(&index_expr, "MemoryOp index")?;
+-        let index_wire =
+-            self.bind_expression_to_new_wire(&index_expr, opcode_index, "MemoryOp index")?;
+-
+-        let value_expr = canonicalize_expression(&op.value);
+-        self.ensure_expression_witnesses_in_range(&value_expr, "MemoryOp value")?;
+-        let value_wire =
+-            self.bind_expression_to_new_wire(&value_expr, opcode_index, "MemoryOp value")?;
+-
+-        let mut selector_wires = Vec::with_capacity(entries.len());
+-        for _ in &entries {
+-            let selector = self.allocate_intermediate_wire();
+-            self.enforce_boolean_wire(selector)?;
+-            selector_wires.push(selector);
+-        }
+-        if let Some(index) = self.known_wire_value(index_wire).and_then(field_to_usize) {
+-            if index >= selector_wires.len() {
+-                return Err(R1csError::InvalidProgramInvariant {
+-                    details: format!(
+-                        "MemoryOp index {index} is out of bounds for block {} with {} entries at opcode index {}",
+-                        block_id.0,
+-                        selector_wires.len(),
+-                        opcode_index
+-                    ),
+-                });
+-            }
+-            for (position, selector_wire) in selector_wires.iter().copied().enumerate() {
+-                self.assign_derived_wire(
+-                    selector_wire,
+-                    if position == index {
+-                        FieldElement::one()
+-                    } else {
+-                        FieldElement::zero()
+-                    },
+-                )?;
+-            }
+-        }
+-
+-        let mut selector_sum = Vec::with_capacity(selector_wires.len());
+-        for selector_wire in &selector_wires {
+-            selector_sum.push(SparseTerm {
+-                wire: *selector_wire,
+-                coeff: FieldElement::one(),
+-            });
+-        }
+-        self.emit_constraint(
+-            vec![SparseTerm {
+-                wire: 0,
+-                coeff: FieldElement::one(),
+-            }],
+-            selector_sum,
+-            vec![SparseTerm {
+-                wire: 0,
+-                coeff: FieldElement::one(),
+-            }],
+-        )?;
+-
+-        let mut index_eq_terms = Vec::with_capacity(selector_wires.len());
+-        for (i, selector_wire) in selector_wires.iter().enumerate() {
+-            index_eq_terms.push(SparseTerm {
+-                wire: *selector_wire,
+-                coeff: FieldElement::from(i as u128),
+-            });
+-        }
+-        self.emit_constraint(
+-            vec![SparseTerm {
+-                wire: 0,
+-                coeff: FieldElement::one(),
+-            }],
+-            index_eq_terms,
+-            vec![SparseTerm {
+-                wire: index_wire,
+-                coeff: FieldElement::one(),
+-            }],
+-        )?;
+-
+-        let mut weighted_old_entries = Vec::with_capacity(entries.len());
+-        for (entry_wire, selector_wire) in entries.iter().zip(selector_wires.iter()) {
+-            let weighted_entry = self.allocate_intermediate_wire();
+-            self.emit_constraint(
+-                vec![SparseTerm {
+-                    wire: *entry_wire,
+-                    coeff: FieldElement::one(),
+-                }],
+-                vec![SparseTerm {
+-                    wire: *selector_wire,
+-                    coeff: FieldElement::one(),
+-                }],
+-                vec![SparseTerm {
+-                    wire: weighted_entry,
+-                    coeff: FieldElement::one(),
+-                }],
+-            )?;
+-            if let (Some(entry), Some(selector)) = (
+-                self.known_wire_value(*entry_wire),
+-                self.known_wire_value(*selector_wire),
+-            ) {
+-                self.assign_derived_wire(weighted_entry, entry * selector)?;
+-            }
+-            weighted_old_entries.push(weighted_entry);
+-        }
+-
+-        let selected_old_wire = self.allocate_intermediate_wire();
+-        let mut selected_terms = Vec::with_capacity(weighted_old_entries.len());
+-        for weighted in &weighted_old_entries {
+-            selected_terms.push(SparseTerm {
+-                wire: *weighted,
+-                coeff: FieldElement::one(),
+-            });
+-        }
+-        self.emit_constraint(
+-            vec![SparseTerm {
+-                wire: 0,
+-                coeff: FieldElement::one(),
+-            }],
+-            selected_terms,
+-            vec![SparseTerm {
+-                wire: selected_old_wire,
+-                coeff: FieldElement::one(),
+-            }],
+-        )?;
+-        let selected_eval_terms = weighted_old_entries
+-            .iter()
+-            .map(|wire| (*wire, FieldElement::one()))
+-            .collect::<Vec<_>>();
+-        if let Some(value) =
+-            self.evaluate_known_linear_combination(&selected_eval_terms, FieldElement::zero())
+-        {
+-            self.assign_derived_wire(selected_old_wire, value)?;
+-        }
+-        // Enforce read semantics only when operation = 0:
+-        // (value - selected_old) * (1 - operation) = 0
+-        self.emit_constraint(
+-            vec![
+-                SparseTerm {
+-                    wire: value_wire,
+-                    coeff: FieldElement::one(),
+-                },
+-                SparseTerm {
+-                    wire: selected_old_wire,
+-                    coeff: -FieldElement::one(),
+-                },
+-            ],
+-            vec![
+-                SparseTerm {
+-                    wire: 0,
+-                    coeff: FieldElement::one(),
+-                },
+-                SparseTerm {
+-                    wire: op_wire,
+-                    coeff: -FieldElement::one(),
+-                },
+-            ],
+-            Vec::new(),
+-        )?;
+-
+-        let mut new_entries = Vec::with_capacity(entries.len());
+-        let mut active_write_wires = Vec::with_capacity(entries.len());
+-        let mut delta_wires = Vec::with_capacity(entries.len());
+-        for (entry_wire, selector_wire) in entries.iter().zip(selector_wires.iter()) {
+-            let active_write = self.allocate_intermediate_wire();
+-            self.emit_constraint(
+-                vec![SparseTerm {
+-                    wire: op_wire,
+-                    coeff: FieldElement::one(),
+-                }],
+-                vec![SparseTerm {
+-                    wire: *selector_wire,
+-                    coeff: FieldElement::one(),
+-                }],
+-                vec![SparseTerm {
+-                    wire: active_write,
+-                    coeff: FieldElement::one(),
+-                }],
+-            )?;
+-            active_write_wires.push(active_write);
+-            if let (Some(operation), Some(selector)) = (
+-                self.known_wire_value(op_wire),
+-                self.known_wire_value(*selector_wire),
+-            ) {
+-                self.assign_derived_wire(active_write, operation * selector)?;
+-            }
+-            let delta_wire = self.allocate_intermediate_wire();
+-            let updated_entry = self.allocate_intermediate_wire();
+-            delta_wires.push(delta_wire);
+-            self.emit_constraint(
+-                vec![SparseTerm {
+-                    wire: active_write,
+-                    coeff: FieldElement::one(),
+-                }],
+-                vec![
+-                    SparseTerm {
+-                        wire: value_wire,
+-                        coeff: FieldElement::one(),
+-                    },
+-                    SparseTerm {
+-                        wire: *entry_wire,
+-                        coeff: -FieldElement::one(),
+-                    },
+-                ],
+-                vec![SparseTerm {
+-                    wire: delta_wire,
+-                    coeff: FieldElement::one(),
+-                }],
+-            )?;
+-            self.emit_constraint(
+-                vec![SparseTerm {
+-                    wire: 0,
+-                    coeff: FieldElement::one(),
+-                }],
+-                vec![
+-                    SparseTerm {
+-                        wire: *entry_wire,
+-                        coeff: FieldElement::one(),
+-                    },
+-                    SparseTerm {
+-                        wire: delta_wire,
+-                        coeff: FieldElement::one(),
+-                    },
+-                ],
+-                vec![SparseTerm {
+-                    wire: updated_entry,
+-                    coeff: FieldElement::one(),
+-                }],
+-            )?;
+-            new_entries.push(updated_entry);
+-        }
+-
+-        self.memory_op_materialization_patterns
+-            .push(MemoryOpMaterializationPattern {
+-                operation_wire: op_wire as usize,
+-                index_wire: index_wire as usize,
+-                value_wire: value_wire as usize,
+-                entry_wires: entries.iter().map(|wire| *wire as usize).collect(),
+-                selector_wires: selector_wires.iter().map(|wire| *wire as usize).collect(),
+-                weighted_entry_wires: weighted_old_entries
+-                    .iter()
+-                    .map(|wire| *wire as usize)
+-                    .collect(),
+-                selected_old_wire: selected_old_wire as usize,
+-                active_write_wires: active_write_wires
+-                    .iter()
+-                    .map(|wire| *wire as usize)
+-                    .collect(),
+-                delta_wires: delta_wires.iter().map(|wire| *wire as usize).collect(),
+-                updated_entry_wires: new_entries.iter().map(|wire| *wire as usize).collect(),
+-            });
+-        self.memory_blocks.insert(block_id.0, new_entries);
+-        Ok(())
++        // beta.22: MemOp.operation is a constant MemOpKind and index/value are
++        // plain Witnesses (were Expressions). Dynamic memory ops are not emitted
++        // by Opaq's circuits (fixed arrays are statically indexed/unrolled), so
++        // fail loudly rather than mis-lower.
++        self.unsupported_opcode(
++            "MemoryOp",
++            opcode_index,
++            "dynamic MemoryOp is not supported by this beta.22 port".to_string(),
++        )
+     }
+ 
+     fn bind_expression_to_new_wire(
+@@ -3359,278 +3094,17 @@ impl<'a> LoweringContext<'a> {
+ 
+     fn lower_multi_scalar_mul_with_constant_folding(
+         &mut self,
+-        call: &AcirBlackBoxFuncCall,
++        _call: &AcirBlackBoxFuncCall,
+         opcode_index: usize,
+     ) -> Result<(), R1csError> {
+-        let (points, scalars, predicate, outputs) = match call {
+-            BlackBoxFuncCall::MultiScalarMul {
+-                points,
+-                scalars,
+-                predicate,
+-                outputs,
+-            } => (points.as_slice(), scalars.as_slice(), predicate, *outputs),
+-            _ => unreachable!("caller must pass MultiScalarMul"),
+-        };
+-
+-        if !points.len().is_multiple_of(3) {
+-            return self.unsupported_opcode(
+-                "BlackBoxFuncCall",
+-                opcode_index,
+-                format!(
+-                    "MultiScalarMul expects points length to be a multiple of 3, found {}",
+-                    points.len()
+-                ),
+-            );
+-        }
+-        if !scalars.len().is_multiple_of(2) {
+-            return self.unsupported_opcode(
+-                "BlackBoxFuncCall",
+-                opcode_index,
+-                format!(
+-                    "MultiScalarMul expects scalars length to be a multiple of 2, found {}",
+-                    scalars.len()
+-                ),
+-            );
+-        }
+-        if points.len() / 3 != scalars.len() / 2 {
+-            return self.unsupported_opcode(
+-                "BlackBoxFuncCall",
+-                opcode_index,
+-                format!(
+-                    "MultiScalarMul points/scalars arity mismatch: {} points vs {} scalars",
+-                    points.len(),
+-                    scalars.len()
+-                ),
+-            );
+-        }
+-
+-        let output_witnesses = [outputs.0, outputs.1, outputs.2];
+-        let mut output_wires = [0u32; 3];
+-        for (index, output) in output_witnesses.iter().enumerate() {
+-            self.ensure_witness_in_range(*output, "BlackBoxFuncCall::MultiScalarMul output")?;
+-            output_wires[index] = self.wire_for_witness(*output)?;
+-        }
+-        let output_x_wire = output_wires[0];
+-        let output_y_wire = output_wires[1];
+-        let output_infinite_wire = output_wires[2];
+-        self.enforce_boolean_wire(output_infinite_wire)?;
+-
+-        let predicate = self.resolve_blackbox_predicate(
+-            predicate,
++        // beta.22 changed MultiScalarMul representation: points are (x, y) pairs
++        // without an is_infinite coordinate and `outputs` is a 2-tuple. Our
++        // circuits never emit this opcode, so fail loudly rather than mis-lower.
++        self.unsupported_opcode(
++            "BlackBoxFuncCall",
+             opcode_index,
+-            "BlackBoxFuncCall::MultiScalarMul predicate",
+-        )?;
+-        if matches!(predicate, ResolvedBlackBoxPredicate::Constant(false)) {
+-            self.enforce_wire_equals_constant(output_x_wire, FieldElement::zero())?;
+-            self.enforce_wire_equals_constant(output_y_wire, FieldElement::zero())?;
+-            self.enforce_wire_equals_constant(output_infinite_wire, FieldElement::one())?;
+-            return Ok(());
+-        }
+-
+-        let predicate_wire = match predicate {
+-            ResolvedBlackBoxPredicate::Constant(true) => 0,
+-            ResolvedBlackBoxPredicate::Wire(wire) => wire,
+-            ResolvedBlackBoxPredicate::Constant(false) => unreachable!(),
+-        };
+-        if let ResolvedBlackBoxPredicate::Wire(wire) = predicate {
+-            let one_minus_predicate = self.boolean_not_wire(wire)?;
+-            self.enforce_selector_times_linear_zero(
+-                one_minus_predicate,
+-                &[(output_x_wire, FieldElement::one())],
+-                FieldElement::zero(),
+-            )?;
+-            self.enforce_selector_times_linear_zero(
+-                one_minus_predicate,
+-                &[(output_y_wire, FieldElement::one())],
+-                FieldElement::zero(),
+-            )?;
+-            self.enforce_selector_times_linear_zero(
+-                one_minus_predicate,
+-                &[(output_infinite_wire, FieldElement::one())],
+-                -FieldElement::one(),
+-            )?;
+-        }
+-
+-        let all_points_constant = points
+-            .iter()
+-            .all(|input| matches!(input, FunctionInput::Constant(_)));
+-        let all_scalars_constant = scalars
+-            .iter()
+-            .all(|input| matches!(input, FunctionInput::Constant(_)));
+-        if all_points_constant && all_scalars_constant {
+-            let point_values: Vec<FieldElement> = points
+-                .iter()
+-                .map(|input| match input {
+-                    FunctionInput::Constant(value) => *value,
+-                    FunctionInput::Witness(_) => unreachable!("all points are constants"),
+-                })
+-                .collect();
+-            let mut scalar_lo = Vec::with_capacity(scalars.len() / 2);
+-            let mut scalar_hi = Vec::with_capacity(scalars.len() / 2);
+-            for (index, scalar) in scalars.iter().enumerate() {
+-                let value = match scalar {
+-                    FunctionInput::Constant(value) => *value,
+-                    FunctionInput::Witness(_) => unreachable!("all scalars are constants"),
+-                };
+-                if index.is_multiple_of(2) {
+-                    scalar_lo.push(value);
+-                } else {
+-                    scalar_hi.push(value);
+-                }
+-            }
+-
+-            let (result_x, result_y, result_infinite) =
+-                match bn254_multi_scalar_mul(&point_values, &scalar_lo, &scalar_hi) {
+-                    Ok(result) => result,
+-                    Err(err) => {
+-                        return self.unsupported_opcode(
+-                            "BlackBoxFuncCall",
+-                            opcode_index,
+-                            format!("failed evaluating constant MultiScalarMul inputs: {err}"),
+-                        );
+-                    }
+-                };
+-
+-            self.enforce_selector_times_linear_zero(
+-                predicate_wire,
+-                &[(output_x_wire, FieldElement::one())],
+-                -result_x,
+-            )?;
+-            self.enforce_selector_times_linear_zero(
+-                predicate_wire,
+-                &[(output_y_wire, FieldElement::one())],
+-                -result_y,
+-            )?;
+-            self.enforce_selector_times_linear_zero(
+-                predicate_wire,
+-                &[(output_infinite_wire, FieldElement::one())],
+-                -result_infinite,
+-            )?;
+-            return Ok(());
+-        }
+-
+-        let mut point_wires = Vec::with_capacity(points.len() / 3);
+-        for point_chunk in points.chunks_exact(3) {
+-            let point_x = self.resolve_blackbox_function_input_wire(
+-                point_chunk.first().expect("point x is present"),
+-                "BlackBoxFuncCall::MultiScalarMul point.x",
+-            )?;
+-            let point_y = self.resolve_blackbox_function_input_wire(
+-                point_chunk.get(1).expect("point y is present"),
+-                "BlackBoxFuncCall::MultiScalarMul point.y",
+-            )?;
+-            let point_infinite = self.resolve_blackbox_function_input_wire(
+-                point_chunk.get(2).expect("point infinite flag is present"),
+-                "BlackBoxFuncCall::MultiScalarMul point.is_infinite",
+-            )?;
+-            self.enforce_boolean_wire(point_infinite)?;
+-
+-            let finite_selector = self.boolean_not_wire(point_infinite)?;
+-            let point_y_squared = self.multiply_wires(point_y, point_y)?;
+-            let point_x_squared = self.multiply_wires(point_x, point_x)?;
+-            let point_x_cubed = self.multiply_wires(point_x_squared, point_x)?;
+-            self.enforce_selector_times_linear_zero(
+-                finite_selector,
+-                &[
+-                    (point_y_squared, FieldElement::one()),
+-                    (point_x_cubed, -FieldElement::one()),
+-                ],
+-                FieldElement::from(17u128),
+-            )?;
+-
+-            point_wires.push([point_x, point_y, point_infinite]);
+-        }
+-
+-        let modulus_bits_le = Self::grumpkin_scalar_modulus_bits_le();
+-        let mut scalar_bits = Vec::with_capacity(scalars.len() / 2);
+-        for point_index in 0..(scalars.len() / 2) {
+-            let scalar_lo = self.resolve_blackbox_function_input_wire(
+-                scalars
+-                    .get(point_index * 2)
+-                    .expect("scalar low limb is present"),
+-                "BlackBoxFuncCall::MultiScalarMul scalar.lo",
+-            )?;
+-            let scalar_hi = self.resolve_blackbox_function_input_wire(
+-                scalars
+-                    .get(point_index * 2 + 1)
+-                    .expect("scalar high limb is present"),
+-                "BlackBoxFuncCall::MultiScalarMul scalar.hi",
+-            )?;
+-            let mut point_scalar_bits = self.decompose_wire_to_bits(
+-                scalar_lo,
+-                128,
+-                opcode_index,
+-                "BlackBoxFuncCall::MultiScalarMul scalar.lo",
+-            )?;
+-            point_scalar_bits.extend(self.decompose_wire_to_bits(
+-                scalar_hi,
+-                128,
+-                opcode_index,
+-                "BlackBoxFuncCall::MultiScalarMul scalar.hi",
+-            )?);
+-
+-            let scalar_is_valid =
+-                self.less_than_constant_bits_le(&point_scalar_bits, &modulus_bits_le)?;
+-            self.enforce_wire_equals_constant(scalar_is_valid, FieldElement::one())
+-                .map_err(|err| match err {
+-                    R1csError::InvalidProgramInvariant { details } => {
+-                        R1csError::InvalidProgramInvariant {
+-                            details: format!(
+-                                "failed constraining MultiScalarMul scalar[{point_index}] < modulus: {details}"
+-                            ),
+-                        }
+-                    }
+-                    other => other,
+-                })?;
+-
+-            scalar_bits.push(point_scalar_bits);
+-        }
+-
+-        let zero_wire = self.constrain_linear_combination_to_new_wire(&[], FieldElement::zero())?;
+-        let mut accumulated = [zero_wire, zero_wire, 0];
+-
+-        for (point, point_scalar_bits) in point_wires.iter().zip(scalar_bits.iter()) {
+-            let mut point_accumulated = [zero_wire, zero_wire, 0];
+-            let mut running = *point;
+-
+-            for scalar_bit in point_scalar_bits {
+-                let add_result =
+-                    self.add_embedded_curve_points_complete(point_accumulated, running)?;
+-                point_accumulated =
+-                    self.select_curve_point(*scalar_bit, add_result, point_accumulated)?;
+-                running = self.add_embedded_curve_points_complete(running, running)?;
+-            }
+-
+-            accumulated =
+-                self.add_embedded_curve_points_complete(accumulated, point_accumulated)?;
+-        }
+-
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[
+-                (output_x_wire, FieldElement::one()),
+-                (accumulated[0], -FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[
+-                (output_y_wire, FieldElement::one()),
+-                (accumulated[1], -FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[
+-                (output_infinite_wire, FieldElement::one()),
+-                (accumulated[2], -FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-
+-        Ok(())
++            "MultiScalarMul is not supported by this beta.22 port".to_string(),
++        )
+     }
+ 
+     fn add_embedded_curve_points_complete(
+@@ -4236,258 +3710,20 @@ impl<'a> LoweringContext<'a> {
+ 
+     fn lower_embedded_curve_add(
+         &mut self,
+-        input1: &[AcirFunctionInput; 3],
+-        input2: &[AcirFunctionInput; 3],
+-        predicate: &AcirFunctionInput,
+-        outputs: (Witness, Witness, Witness),
++        _input1: &Box<[AcirFunctionInput; 2]>,
++        _input2: &Box<[AcirFunctionInput; 2]>,
++        _predicate: &AcirFunctionInput,
++        _outputs: (Witness, Witness),
+         opcode_index: usize,
+     ) -> Result<(), R1csError> {
+-        let output_witnesses = [outputs.0, outputs.1, outputs.2];
+-        let mut output_wires = [0u32; 3];
+-        for (index, output) in output_witnesses.iter().enumerate() {
+-            self.ensure_witness_in_range(*output, "BlackBoxFuncCall::EmbeddedCurveAdd output")?;
+-            output_wires[index] = self.wire_for_witness(*output)?;
+-        }
+-        let output_x_wire = output_wires[0];
+-        let output_y_wire = output_wires[1];
+-        let output_infinite_wire = output_wires[2];
+-
+-        let predicate = self.resolve_blackbox_predicate(
+-            predicate,
++        // beta.22 changed EmbeddedCurveAdd representation: inputs are (x, y)
++        // pairs without is_infinite and `outputs` is a 2-tuple. Our circuits
++        // never emit this opcode, so fail loudly rather than mis-lower.
++        self.unsupported_opcode(
++            "BlackBoxFuncCall",
+             opcode_index,
+-            "BlackBoxFuncCall::EmbeddedCurveAdd predicate",
+-        )?;
+-        if matches!(predicate, ResolvedBlackBoxPredicate::Constant(false)) {
+-            self.enforce_wire_equals_constant(output_x_wire, FieldElement::zero())?;
+-            self.enforce_wire_equals_constant(output_y_wire, FieldElement::zero())?;
+-            self.enforce_wire_equals_constant(output_infinite_wire, FieldElement::one())?;
+-            return Ok(());
+-        }
+-
+-        let predicate_wire = match predicate {
+-            ResolvedBlackBoxPredicate::Constant(true) => 0,
+-            ResolvedBlackBoxPredicate::Wire(wire) => wire,
+-            ResolvedBlackBoxPredicate::Constant(false) => unreachable!(),
+-        };
+-        if let ResolvedBlackBoxPredicate::Wire(wire) = predicate {
+-            let one_minus_predicate = self.boolean_not_wire(wire)?;
+-            self.enforce_selector_times_linear_zero(
+-                one_minus_predicate,
+-                &[(output_x_wire, FieldElement::one())],
+-                FieldElement::zero(),
+-            )?;
+-            self.enforce_selector_times_linear_zero(
+-                one_minus_predicate,
+-                &[(output_y_wire, FieldElement::one())],
+-                FieldElement::zero(),
+-            )?;
+-            self.enforce_selector_times_linear_zero(
+-                one_minus_predicate,
+-                &[(output_infinite_wire, FieldElement::one())],
+-                -FieldElement::one(),
+-            )?;
+-        }
+-
+-        let input1_x = self.resolve_blackbox_function_input_wire(
+-            input1.first().expect("input1 x is present"),
+-            "BlackBoxFuncCall::EmbeddedCurveAdd input1.x",
+-        )?;
+-        let input1_y = self.resolve_blackbox_function_input_wire(
+-            input1.get(1).expect("input1 y is present"),
+-            "BlackBoxFuncCall::EmbeddedCurveAdd input1.y",
+-        )?;
+-        let input1_infinite = self.resolve_blackbox_function_input_wire(
+-            input1.get(2).expect("input1 infinite is present"),
+-            "BlackBoxFuncCall::EmbeddedCurveAdd input1.is_infinite",
+-        )?;
+-        let input2_x = self.resolve_blackbox_function_input_wire(
+-            input2.first().expect("input2 x is present"),
+-            "BlackBoxFuncCall::EmbeddedCurveAdd input2.x",
+-        )?;
+-        let input2_y = self.resolve_blackbox_function_input_wire(
+-            input2.get(1).expect("input2 y is present"),
+-            "BlackBoxFuncCall::EmbeddedCurveAdd input2.y",
+-        )?;
+-        let input2_infinite = self.resolve_blackbox_function_input_wire(
+-            input2.get(2).expect("input2 infinite is present"),
+-            "BlackBoxFuncCall::EmbeddedCurveAdd input2.is_infinite",
+-        )?;
+-
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[(input1_infinite, FieldElement::one())],
+-            FieldElement::zero(),
+-        )?;
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[(input2_infinite, FieldElement::one())],
+-            FieldElement::zero(),
+-        )?;
+-
+-        let input1_y_squared = self.multiply_wires(input1_y, input1_y)?;
+-        let input1_x_squared = self.multiply_wires(input1_x, input1_x)?;
+-        let input1_x_cubed = self.multiply_wires(input1_x_squared, input1_x)?;
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[
+-                (input1_y_squared, FieldElement::one()),
+-                (input1_x_cubed, -FieldElement::one()),
+-            ],
+-            FieldElement::from(17u128),
+-        )?;
+-
+-        let input2_y_squared = self.multiply_wires(input2_y, input2_y)?;
+-        let input2_x_squared = self.multiply_wires(input2_x, input2_x)?;
+-        let input2_x_cubed = self.multiply_wires(input2_x_squared, input2_x)?;
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[
+-                (input2_y_squared, FieldElement::one()),
+-                (input2_x_cubed, -FieldElement::one()),
+-            ],
+-            FieldElement::from(17u128),
+-        )?;
+-
+-        let same_x = self.equality_indicator_wire(input1_x, input2_x)?;
+-        let same_y = self.equality_indicator_wire(input1_y, input2_y)?;
+-        let y_sum = self.constrain_linear_combination_to_new_wire(
+-            &[
+-                (input1_y, FieldElement::one()),
+-                (input2_y, FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        let zero_wire = self.constrain_linear_combination_to_new_wire(&[], FieldElement::zero())?;
+-        let opposite_y = self.equality_indicator_wire(y_sum, zero_wire)?;
+-
+-        let expected_output_infinite = self.boolean_and_wires(same_x, opposite_y)?;
+-        self.enforce_selector_times_linear_zero(
+-            predicate_wire,
+-            &[
+-                (output_infinite_wire, FieldElement::one()),
+-                (expected_output_infinite, -FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-
+-        let one_minus_expected_output_infinite = self.boolean_not_wire(expected_output_infinite)?;
+-        let finite_selector =
+-            self.multiply_wires(predicate_wire, one_minus_expected_output_infinite)?;
+-        self.enforce_boolean_wire(finite_selector)?;
+-        let infinite_selector = self.multiply_wires(predicate_wire, expected_output_infinite)?;
+-        self.enforce_boolean_wire(infinite_selector)?;
+-
+-        let is_double = self.boolean_and_wires(same_x, same_y)?;
+-        let one_minus_is_double = self.boolean_not_wire(is_double)?;
+-        let add_selector = self.multiply_wires(finite_selector, one_minus_is_double)?;
+-        self.enforce_boolean_wire(add_selector)?;
+-        let double_selector = self.multiply_wires(finite_selector, is_double)?;
+-        self.enforce_boolean_wire(double_selector)?;
+-
+-        let x2_minus_x1 = self.constrain_linear_combination_to_new_wire(
+-            &[
+-                (input2_x, FieldElement::one()),
+-                (input1_x, -FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        let add_denominator_inverse = self.allocate_intermediate_wire();
+-        let add_denominator_inverse_check =
+-            self.multiply_wires(x2_minus_x1, add_denominator_inverse)?;
+-        self.enforce_selector_times_linear_zero(
+-            add_selector,
+-            &[(add_denominator_inverse_check, FieldElement::one())],
+-            -FieldElement::one(),
+-        )?;
+-        let y2_minus_y1 = self.constrain_linear_combination_to_new_wire(
+-            &[
+-                (input2_y, FieldElement::one()),
+-                (input1_y, -FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        let add_lambda = self.multiply_wires(y2_minus_y1, add_denominator_inverse)?;
+-
+-        let two_y1 = self.constrain_linear_combination_to_new_wire(
+-            &[(input1_y, FieldElement::from(2u128))],
+-            FieldElement::zero(),
+-        )?;
+-        let double_denominator_inverse = self.allocate_intermediate_wire();
+-        let double_denominator_inverse_check =
+-            self.multiply_wires(two_y1, double_denominator_inverse)?;
+-        self.enforce_selector_times_linear_zero(
+-            double_selector,
+-            &[(double_denominator_inverse_check, FieldElement::one())],
+-            -FieldElement::one(),
+-        )?;
+-        let three_x1_squared = self.constrain_linear_combination_to_new_wire(
+-            &[(input1_x_squared, FieldElement::from(3u128))],
+-            FieldElement::zero(),
+-        )?;
+-        let double_lambda = self.multiply_wires(three_x1_squared, double_denominator_inverse)?;
+-
+-        let add_lambda_squared = self.multiply_wires(add_lambda, add_lambda)?;
+-        self.enforce_selector_times_linear_zero(
+-            add_selector,
+-            &[
+-                (output_x_wire, FieldElement::one()),
+-                (add_lambda_squared, -FieldElement::one()),
+-                (input1_x, FieldElement::one()),
+-                (input2_x, FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        let input1_x_minus_output_x = self.constrain_linear_combination_to_new_wire(
+-            &[
+-                (input1_x, FieldElement::one()),
+-                (output_x_wire, -FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        let add_y_intermediate = self.multiply_wires(add_lambda, input1_x_minus_output_x)?;
+-        self.enforce_selector_times_linear_zero(
+-            add_selector,
+-            &[
+-                (output_y_wire, FieldElement::one()),
+-                (add_y_intermediate, -FieldElement::one()),
+-                (input1_y, FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-
+-        let double_lambda_squared = self.multiply_wires(double_lambda, double_lambda)?;
+-        self.enforce_selector_times_linear_zero(
+-            double_selector,
+-            &[
+-                (output_x_wire, FieldElement::one()),
+-                (double_lambda_squared, -FieldElement::one()),
+-                (input1_x, FieldElement::from(2u128)),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-        let double_y_intermediate = self.multiply_wires(double_lambda, input1_x_minus_output_x)?;
+-        self.enforce_selector_times_linear_zero(
+-            double_selector,
+-            &[
+-                (output_y_wire, FieldElement::one()),
+-                (double_y_intermediate, -FieldElement::one()),
+-                (input1_y, FieldElement::one()),
+-            ],
+-            FieldElement::zero(),
+-        )?;
+-
+-        self.enforce_selector_times_linear_zero(
+-            infinite_selector,
+-            &[(output_x_wire, FieldElement::one())],
+-            FieldElement::zero(),
+-        )?;
+-        self.enforce_selector_times_linear_zero(
+-            infinite_selector,
+-            &[(output_y_wire, FieldElement::one())],
+-            FieldElement::zero(),
+-        )?;
+-
+-        Ok(())
++            "EmbeddedCurveAdd is not supported by this beta.22 port".to_string(),
++        )
+     }
+ 
+     fn resolve_blackbox_predicate(
+@@ -4953,7 +4189,8 @@ impl<'a> LoweringContext<'a> {
+                 expression_predicate_state(predicate)
+             }
+             Opcode::BlackBoxFuncCall(call) => blackbox_predicate_state(call),
+-            Opcode::MemoryOp { op, .. } => expression_predicate_state(&op.operation),
++            // beta.22: MemOp.operation is a constant MemOpKind, not an Expression.
++            Opcode::MemoryOp { .. } => "memop".to_string(),
+             Opcode::AssertZero(_) | Opcode::MemoryInit { .. } => "none".to_string(),
+         }
+     }
+@@ -5088,12 +4325,13 @@ impl<'a> LoweringContext<'a> {
+         if self.wire_map.contains_key(&witness.witness_index()) {
+             return Ok(());
+         }
+-        if witness.witness_index() > self.circuit.current_witness_index {
++        let max_witness = noir_acir::max_witness_index(self.circuit);
++        if witness.witness_index() > max_witness {
+             return Err(R1csError::InvalidProgramInvariant {
+                 details: format!(
+-                    "{context}: witness {} exceeds current_witness_index {}",
++                    "{context}: witness {} exceeds max witness index {}",
+                     witness.witness_index(),
+-                    self.circuit.current_witness_index
++                    max_witness
+                 ),
+             });
+         }
+@@ -6237,9 +5475,11 @@ fn remap_opcode(
+                     .expect("call memory block map must cover MemoryOp"),
+             ),
+             op: MemOp {
+-                operation: remap_expression(&op.operation, witness_map),
+-                index: remap_expression(&op.index, witness_map),
+-                value: remap_expression(&op.value, witness_map),
++                // beta.22: operation is a constant MemOpKind (Copy); index/value
++                // are plain Witnesses, not Expressions.
++                operation: op.operation,
++                index: remap_witness(op.index, witness_map),
++                value: remap_witness(op.value, witness_map),
+             },
+         },
+         Opcode::BlackBoxFuncCall(call) => {
+@@ -6404,7 +5644,6 @@ fn remap_blackbox_call(
+             outputs: (
+                 remap_witness(outputs.0, witness_map),
+                 remap_witness(outputs.1, witness_map),
+-                remap_witness(outputs.2, witness_map),
+             ),
+         },
+         BlackBoxFuncCall::EmbeddedCurveAdd {
+@@ -6419,7 +5658,6 @@ fn remap_blackbox_call(
+             outputs: (
+                 remap_witness(outputs.0, witness_map),
+                 remap_witness(outputs.1, witness_map),
+-                remap_witness(outputs.2, witness_map),
+             ),
+         },
+         BlackBoxFuncCall::Keccakf1600 { inputs, outputs } => BlackBoxFuncCall::Keccakf1600 {
+diff --git a/crates/noir-witness/src/lib.rs b/crates/noir-witness/src/lib.rs
+index 1e531d2..009a28f 100644
+--- a/crates/noir-witness/src/lib.rs
++++ b/crates/noir-witness/src/lib.rs
+@@ -256,7 +256,8 @@ pub fn generate_witness_with_options(
+     if options.pedantic_solving {
+         validate_pedantic_dynamic_checks(circuit, &witness_map)?;
+     }
+-    let witness_vector = witness_map_to_vector(&witness_map, circuit.current_witness_index);
++    let witness_vector =
++        witness_map_to_vector(&witness_map, noir_acir::max_witness_index(circuit));
+ 
+     Ok(WitnessArtifacts {
+         witness_map,
+@@ -305,7 +306,15 @@ fn validate_pedantic_constant_checks(artifact: &Artifact) -> Result<(), WitnessE
+                 Opcode::Call { predicate, .. } | Opcode::BrilligCall { predicate, .. } => {
+                     predicate.to_const().copied()
+                 }
+-                Opcode::MemoryOp { op, .. } => op.operation.to_const().copied(),
++                Opcode::MemoryOp { op, .. } => Some(
++                    // beta.22: MemOp.operation is a MemOpKind enum (was an Expression
++                    // const). Read = 0, Write = 1, matching the old encoding.
++                    if matches!(op.operation, acir::circuit::opcodes::MemOpKind::Write) {
++                        FieldElement::from(1u128)
++                    } else {
++                        FieldElement::from(0u128)
++                    },
++                ),
+                 Opcode::BlackBoxFuncCall(call) => constant_blackbox_predicate(call),
+                 Opcode::AssertZero(_) | Opcode::MemoryInit { .. } => None,
+             };
+@@ -346,9 +355,12 @@ fn validate_pedantic_dynamic_checks(
+                 )?;
+             }
+             Opcode::MemoryOp { op, .. } => {
+-                let value = evaluate_expression(&op.operation, witness_map).map_err(|details| {
+-                    pedantic_violation(opcode, 0, index, "dynamic-check".to_string(), details)
+-                })?;
++                // beta.22: MemOp.operation is a constant MemOpKind (Read=0/Write=1).
++                let value = if matches!(op.operation, acir::circuit::opcodes::MemOpKind::Write) {
++                    FieldElement::from(1u128)
++                } else {
++                    FieldElement::from(0u128)
++                };
+                 ensure_boolean_pedantic_value(
+                     opcode,
+                     0,

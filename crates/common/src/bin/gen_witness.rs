@@ -110,8 +110,10 @@ fn main() {
             ("blinding_factor", field_hex(&blinding)),
         ],
         &[
-            ("merkle_path", siblings.iter().map(|s| field_hex(s)).collect()),
-            ("merkle_path_indices", right.iter().map(|b| if *b { "0x1".to_string() } else { "0x0".to_string() }).collect()),
+            // pre-formatted JSON: Field elements are quoted "0x.." strings,
+            // bools are raw JSON true/false (the ABI parser wants real booleans).
+            ("merkle_path", siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect()),
+            ("merkle_path_indices", right.iter().map(|b| b.to_string()).collect()),
         ],
     );
 
@@ -147,7 +149,8 @@ fn write_json(
         .map(|(k, v)| format!("\"{k}\":\"{v}\""))
         .collect();
     for (k, vs) in arrays {
-        let arr = vs.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(",");
+        // elements are already JSON-formatted by the caller (quoted or raw)
+        let arr = vs.join(",");
         entries.push(format!("\"{k}\":[{arr}]"));
     }
     let json = format!("{{{}}}", entries.join(","));

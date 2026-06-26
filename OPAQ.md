@@ -658,6 +658,21 @@ a Groth16 backend for Noir's ACIR (research-grade, risky); (c) stay Noir+Honk
 with split verification (large, breaks atomicity). The M1/M2 Noir circuits
 already built still encode the correct constraints and port directly to Circom.
 
+**RESOLVED (2026-06-26): option (b), Noir ACIR -> Groth16, working end-to-end.**
+We forward-ported the only existing tool ([jamesbachini/Noir-Groth16], pinned to
+noir beta.19) to our beta.22 toolchain (the ACIR API moved: `current_witness_index`
+removed, `MemOp`/blackbox opcodes restructured). Pipeline: `nargo compile` ->
+`noir-cli interop` (.r1cs/.wtns) -> snarkjs Groth16 (BN254) setup/prove/verify.
+**Both `deposit` and `withdraw` prove and verify**, with snarkjs public signals
+matching the circuits' public inputs exactly. Vendored as a patch + setup script
+in `tools/noir-groth16/`; run via `scripts/groth16-prove.sh <circuit>`.
+Caveat: unaudited code requiring re-port on each Noir upgrade — a minimal owned
+ACIR->R1CS (only `AssertZero` + `RANGE` are needed) stays the cleaner long-term
+option. **Next (M3):** on-chain verifier consuming these snarkjs BN254 proofs via
+Light Protocol's `groth16-solana` (`alt_bn128` syscalls).
+
+[jamesbachini/Noir-Groth16]: https://github.com/jamesbachini/Noir-Groth16
+
 **Time-boxing advice:** this step alone could take longer than everything
 else combined if the verifier math has any subtlety the agent misjudges.
 Budget accordingly — if B.0's Poseidon check passes but this step stalls, the

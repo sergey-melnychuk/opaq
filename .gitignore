@@ -8,9 +8,13 @@
 
 # Generated witness fixtures (deterministic; produced by gen_witness / prove.sh)
 circuits/*/Prover.toml
+circuits/*/inputs.json
 
 # Node
 node_modules/
+
+# Vendored Noir->Groth16 backend build (cloned + patched by tools/noir-groth16/setup.sh)
+tools/noir-groth16/build/
 
 # Local validator ledgers / logs
 test-ledger/
