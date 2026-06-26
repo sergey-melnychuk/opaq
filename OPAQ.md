@@ -789,7 +789,16 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
 [x] M5  — NullifierSet account: insert/check logic unit-tested in isolation
 [x] M6  — deposit instruction wired end-to-end on local validator (Test 1, steps 1-3)
 [x] M7  — withdraw instruction wired end-to-end on local validator (Test 1, steps 4-5)
-[~] M8  — Test 1 (round-trip) + Test 2 (double-spend) PASS on validator; Tests 3-6 (forged-input, stale-root, ring-overflow, multi-token) remain
+[~] M8  — Tests 1,2,3 + recipient-binding PASS on validator (round-trip,
+          double-spend, forged-amount deposit & withdraw, wrong-recipient).
+          Tests 4-6 (stale-root, ring-overflow, multi-token) remain — they need
+          MULTIPLE proofs verified against ONE embedded VK, which the current
+          pipeline can't do: the snarkjs ceremony is NON-DETERMINISTIC (each
+          `groth16-prove` run yields a different VK; confirmed by sha256). The
+          e2e works because it regenerates VK+proof together per run. Fix before
+          Tests 4-6 (and before any real deploy): run the Groth16 setup ONCE to
+          fix the zkey/VK, then prove every note against it — i.e. a proper
+          (and secure) ceremony, which is the B.6 production blocker anyway.
 [ ] M9  — Prover CLI polished: note encryption, clean error messages, recipient-history warning (per A.8)
 [ ] M10 — Test 7 (zero-infra read path) verified from a genuinely clean machine
 [ ] M11 — Deployed and demoed on Solana devnet (not just local validator)
