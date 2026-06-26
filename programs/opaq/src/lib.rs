@@ -40,6 +40,8 @@ pub const E_PROOF_INVALID: u32 = 1;
 pub const E_TREE_FULL: u32 = 2;
 pub const E_ALREADY_SPENT: u32 = 3;
 pub const E_UNKNOWN_ROOT: u32 = 4;
+pub const E_WRONG_VAULT: u32 = 5;
+pub const E_WRONG_RECIPIENT: u32 = 6;
 
 const DEPOSIT_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     nr_pubinputs: 3,
@@ -264,6 +266,24 @@ fn read_account<T: BorshDeserialize>(account: &AccountInfo) -> Result<T, Program
     T::deserialize(&mut &account.data.borrow()[..]).map_err(|_| ProgramError::InvalidAccountData)
 }
 
+/// Verify `vault_token` is an SPL token account for `token_id` whose authority
+/// is the vault PDA — a real vault for this mint controlled by the program.
+/// SPL token account layout: mint @0..32, owner(authority) @32..64.
+fn check_vault(
+    vault_token: &AccountInfo,
+    token_id: &[u8; 32],
+    vault_authority: &Pubkey,
+) -> ProgramResult {
+    let data = vault_token.data.borrow();
+    if data.len() < 64 {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if &data[0..32] != token_id || &data[32..64] != vault_authority.as_ref() {
+        return Err(ProgramError::Custom(E_WRONG_VAULT));
+    }
+    Ok(())
+}
+
 /// SPL Token `Transfer` (tag 3): `amount` from `source` to `dest`, signed by
 /// `authority`. Built by hand to avoid an spl-token dep + type mismatches.
 fn spl_transfer<'a>(
@@ -327,8 +347,6 @@ fn initialize_pool(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResu
     Ok(())
 }
 
-pub const VAULT_TOKEN_SEED: &[u8] = b"vault_token";
-
 /// Deposit: verify the binding proof, move SPL into the canonical vault, insert
 /// the commitment.
 /// Accounts: [depositor (signer), depositor_token (w), vault_token (w),
@@ -371,13 +389,11 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progra
     if tree_ai.key != &tree_pda {
         return Err(ProgramError::InvalidSeeds);
     }
-    // The vault MUST be the canonical per-mint PDA, else funds go elsewhere while
-    // a valid commitment lets the depositor later drain the real vault.
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[VAULT_TOKEN_SEED, &token_id], program_id);
-    if vault_token.key != &vault_pda {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    // The vault must be a token account for this mint owned by the vault PDA,
+    // else funds go elsewhere while a valid commitment lets the depositor later
+    // drain the real vault.
+    let (vault_authority, _) = Pubkey::find_program_address(&[VAULT_SEED, &token_id], program_id);
+    check_vault(vault_token, &token_id, &vault_authority)?;
 
     // Move exactly `amount` (the proof-bound amount) depositor -> vault.
     spl_transfer(token_program, depositor_token, vault_token, depositor, amount, &[])?;
@@ -439,16 +455,22 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progr
     }
     let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
     let (nf_pda, _) = Pubkey::find_program_address(&[NULLIFIER_SEED], program_id);
-    let (vault_token_pda, _) =
-        Pubkey::find_program_address(&[VAULT_TOKEN_SEED, &token_id], program_id);
     let (vault_auth_pda, vault_bump) =
         Pubkey::find_program_address(&[VAULT_SEED, &token_id], program_id);
     if tree_ai.key != &tree_pda
         || nullifier_ai.key != &nf_pda
-        || vault_token.key != &vault_token_pda
         || vault_authority.key != &vault_auth_pda
     {
         return Err(ProgramError::InvalidSeeds);
+    }
+    check_vault(vault_token, &token_id, &vault_auth_pda)?;
+    // recipient_token must be owned by the proof-bound recipient — otherwise the
+    // recipient public input is toothless and a submitter could redirect funds.
+    {
+        let rt = recipient_token.data.borrow();
+        if rt.len() < 64 || rt[32..64] != recipient {
+            return Err(ProgramError::Custom(E_WRONG_RECIPIENT));
+        }
     }
 
     // Root must be in the recent ring buffer (proofs may target a moved root).

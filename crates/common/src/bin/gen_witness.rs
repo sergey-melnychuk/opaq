@@ -22,9 +22,13 @@ fn main() {
     // Deterministic note secrets (M1 fixtures, not real randomness).
     let spend_key = be32(987_654_321);
     let blinding = be32(123_456_789);
-    let amount = be32(100);
-    let token_id = to_field_be(&dummy_pubkey(0xAB)); // canonical mint encoding
-    let recipient = to_field_be(&dummy_pubkey(0xCD)); // canonical recipient encoding
+    // Real test params come from env (the M8 e2e harness); otherwise dummy fixtures.
+    let amount_u64: u64 = std::env::var("OPAQ_AMOUNT").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
+    let amount = be32(amount_u64 as u128);
+    let mint_bytes = hex32_env("OPAQ_MINT_HEX").unwrap_or_else(|| dummy_pubkey(0xAB));
+    let recipient_bytes = hex32_env("OPAQ_RECIPIENT_HEX").unwrap_or_else(|| dummy_pubkey(0xCD));
+    let token_id = to_field_be(&mint_bytes); // canonical mint encoding
+    let recipient = to_field_be(&recipient_bytes); // canonical recipient encoding
 
     // Derivations matching the circuits.
     let owner_pubkey = poseidon_be(&[spend_key]); // hash_1([spend_key])
@@ -122,9 +126,28 @@ fn main() {
         ],
     );
 
+    // Sidecar for the M8 e2e harness: real instruction args + computed fields.
+    let sidecar = format!(
+        "{{\"mint_hex\":\"{}\",\"recipient_hex\":\"{}\",\"amount\":{},\
+         \"commitment\":\"{}\",\"nullifier\":\"{}\",\"merkle_root\":\"{}\"}}\n",
+        hex::encode(mint_bytes),
+        hex::encode(recipient_bytes),
+        amount_u64,
+        hex::encode(commitment),
+        hex::encode(nullifier),
+        hex::encode(merkle_root),
+    );
+    fs::write(circuits_dir.join("e2e_values.json"), sidecar).unwrap();
+
     println!("commitment = {}", field_hex(&commitment));
     println!("nullifier  = {}", field_hex(&nullifier));
     println!("root       = {}", field_hex(&merkle_root));
+}
+
+fn hex32_env(var: &str) -> Option<[u8; 32]> {
+    let s = std::env::var(var).ok()?;
+    let bytes = hex::decode(s.trim_start_matches("0x")).ok()?;
+    bytes.try_into().ok()
 }
 
 fn dummy_pubkey(seed: u8) -> [u8; 32] {
