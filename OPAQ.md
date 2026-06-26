@@ -847,3 +847,53 @@ Per A.6's phasing — do not let scope creep in:
 - Sorted/hashtable nullifier set optimization (documented Phase 1.5 item, not a blocker)
 
 If the implementing agent finds itself building any of the above mid-Phase-1, that's a signal to stop and re-check this spec rather than improvise.
+
+### B.11 Next Steps (consolidated roadmap)
+
+Phase 1 is **verified end-to-end** — deposit/withdraw round-trip with the full
+negative-test envelope on a local validator and on devnet (B.9: M0–M8, M10, M11
+done; M9 partial). But it is a **working demo, not a deployable pool**. The items
+below are the path from here, ordered by what gates real use. (1)–(2) are hard
+blockers; nothing should hold real funds until both are done.
+
+**1. Secure proving ceremony — HARD BLOCKER.** Today the zkeys come from a
+trivial powers-of-tau with no contributions (B.6 SECURITY CAVEAT), so the
+verifying key is **forgeable** — anyone could mint a valid proof and drain the
+pool. Run a real ceremony: a phase-1 powers-of-tau with multiple independent
+contributions, then a per-circuit phase-2 contribution, for both `deposit` and
+`withdraw`. The M8 setup/prove split (`scripts/groth16-setup.sh` once →
+`groth16-prove-note.sh` per note) is exactly the shape this needs — swap the
+local `powersoftau new` + single `zkey contribute` for the real ceremony output,
+then re-embed the resulting VKs (`vk_deposit.rs` / `vk_withdraw.rs`).
+
+**2. Audit — HARD BLOCKER.** Two surfaces: (a) the native program
+(`programs/opaq`) — proof-input binding, PDA/vault checks, nullifier set,
+realloc/rent, arithmetic; and (b) the **unaudited** vendored Noir→Groth16
+backend (`tools/noir-groth16`, B.6) which lowers ACIR→R1CS and is the thing that
+makes the proofs *mean* what the circuits say. A constraint-soundness bug there
+is as dangerous as a program bug. Owning a minimal, auditable ACIR→R1CS for just
+`AssertZero` + `RANGE` (the only opcodes our circuits emit) is the cleaner
+long-term alternative to maintaining/auditing the general-purpose fork.
+
+**3. Finish M9 (prover CLI polish).** Wire the CLI to (a) prove + submit deposits
+and withdraws itself (currently it emits public inputs / hands off to the
+scripts), (b) reconstruct the withdraw Merkle path via the M10 read path inside
+`opaq withdraw` (so it works against any pool state, not just a fresh one — the
+gap M11 papered over with a fresh-program-per-run shortcut), and (c) do a real
+RPC recipient-history lookup behind the A.8 warning (currently advisory).
+
+**4. Phase 1.5 optimizations (non-blocking).** Sorted/hash-table nullifier set
+(B.2 — replaces the O(n) linear scan), and benchmark per-tx CU precisely
+(A.10). Worth doing before mainnet scale, not before correctness.
+
+**5. Phase 2 — private transfer + hidden amounts (A.6).** The big privacy win:
+`transfer.nr` N-input/M-output join-split with per-`token_id` value
+conservation, which also closes the A.12 limitation (amounts/token are public in
+Phase 1, so the anonymity set is only identical-`(token, amount)` transfers).
+Until Phase 2, treat the privacy as "unlinkable only within an identical-amount
+crowd."
+
+**6. Phase 3 — cross-chain burn/mint (A.6).** `burn.nr`, the EVM Solidity
+verifier (turnkey via `bb`), the permissionless relay pattern, and the
+two-chains-don't-share-state trust writeup (A.9). This is where the
+BN254-everywhere bet pays off.
