@@ -789,7 +789,7 @@ Per B.0. Automated script comparing Noir/`light-poseidon`/on-chain-syscall outpu
 [x] M5  — NullifierSet account: insert/check logic unit-tested in isolation
 [x] M6  — deposit instruction wired end-to-end on local validator (Test 1, steps 1-3)
 [x] M7  — withdraw instruction wired end-to-end on local validator (Test 1, steps 4-5)
-[x] M8  — Tests 1,2,3,4,6 + recipient-binding PASS on validator: round-trip,
+[x] M8  — Tests 1-6 + recipient-binding PASS on validator: round-trip,
           double-spend (T2), forged-amount deposit & withdraw (T3), stale-root
           tolerance (T4), multi-token vault isolation (T6), wrong-recipient.
           Unblocked by splitting Groth16 setup (fixed zkey/VK, once) from proving
