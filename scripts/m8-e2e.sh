@@ -16,13 +16,15 @@ WORK="$(mktemp -d)"
 cd "$ROOT/tests" && { [ -d node_modules ] || npm install --silent; }
 cd "$ROOT"
 
-echo "==> mint + recipient keypairs"
+echo "==> mint + mint2 + recipient keypairs"
 solana-keygen new --no-bip39-passphrase --silent --force -o "$WORK/mint.json" >/dev/null
+solana-keygen new --no-bip39-passphrase --silent --force -o "$WORK/mint2.json" >/dev/null
 solana-keygen new --no-bip39-passphrase --silent --force -o "$WORK/recipient.json" >/dev/null
 hexpub() { node -e "const {Keypair}=require('$ROOT/tests/node_modules/@solana/web3.js');const fs=require('fs');process.stdout.write(Buffer.from(Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(process.argv[1])))).publicKey.toBytes()).toString('hex'))" "$1"; }
 export OPAQ_MINT_HEX="$(hexpub "$WORK/mint.json")"
 export OPAQ_RECIPIENT_HEX="$(hexpub "$WORK/recipient.json")"
 export OPAQ_AMOUNT=1000
+MINT2_HEX="$(hexpub "$WORK/mint2.json")"
 echo "    mint=$OPAQ_MINT_HEX"
 
 # Note A's witnesses (deposit + withdraw), then FIX a zkey/VK per circuit so
@@ -56,6 +58,13 @@ echo "==> gen + prove note B (deposit)"
 OPAQ_BLINDING=222222222 cargo run -q -p opaq-common --bin gen_witness -- "$ROOT/circuits" >/dev/null
 prove_note deposit "$ROOT/circuits/deposit/inputs.json" "$WORK/deposit_b.bin"
 
+# Note C: a deposit of a DIFFERENT token (mint2) — same deposit zkey (circuit is
+# token-agnostic) — to check per-mint vault isolation (Test 6).
+echo "==> gen + prove note C (deposit, mint2)"
+OPAQ_MINT_HEX="$MINT2_HEX" OPAQ_BLINDING=333333333 \
+  cargo run -q -p opaq-common --bin gen_witness -- "$ROOT/circuits" >/dev/null
+prove_note deposit "$ROOT/circuits/deposit/inputs.json" "$WORK/deposit_c.bin"
+
 echo "==> build opaq (fixed VKs)"
 ( cd "$PROG" && cargo build-sbf --tools-version v1.54 )
 
@@ -77,4 +86,5 @@ solana program deploy "$PROG/target/deploy/opaq.so" \
 echo "==> run e2e"
 node "$ROOT/tests/m8_e2e.mjs" \
   "$PROG/target/deploy/opaq-keypair.json" "$WORK/mint.json" "$WORK/recipient.json" \
-  "$WORK/deposit.bin" "$WORK/deposit_b.bin" "$WORK/withdraw.bin"
+  "$WORK/deposit.bin" "$WORK/deposit_b.bin" "$WORK/withdraw.bin" \
+  "$WORK/mint2.json" "$WORK/deposit_c.bin"

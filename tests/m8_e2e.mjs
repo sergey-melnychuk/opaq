@@ -12,11 +12,13 @@ import {
 } from "@solana/spl-token";
 
 const kp = (p) => Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(p, "utf8"))));
-const [progPath, mintPath, recipPath, depositBin, depositBBin, withdrawBin] = process.argv.slice(2);
-const rpc = process.argv[8] || "http://127.0.0.1:8899";
+const [progPath, mintPath, recipPath, depositBin, depositBBin, withdrawBin, mint2Path, depositCBin] =
+  process.argv.slice(2);
+const rpc = process.argv[10] || "http://127.0.0.1:8899";
 
 const programId = kp(progPath).publicKey;
 const mintKp = kp(mintPath);
+const mint2Kp = kp(mint2Path);
 const recipient = kp(recipPath);
 const AMOUNT = 1000n;
 const conn = new Connection(rpc, "confirmed");
@@ -58,6 +60,13 @@ async function main() {
   const vaultAta = (await getOrCreateAssociatedTokenAccount(conn, payer, mint, vaultAuthority, true)).address;
   const recipientAta = (await getOrCreateAssociatedTokenAccount(conn, payer, mint, recipient.publicKey)).address;
 
+  // Second token (mint2) for the multi-token isolation check (Test 6).
+  const mint2 = await createMint(conn, payer, payer.publicKey, null, 0, mint2Kp);
+  const depositor2Ata = (await getOrCreateAssociatedTokenAccount(conn, payer, mint2, payer.publicKey)).address;
+  await mintTo(conn, payer, mint2, depositor2Ata, payer, AMOUNT);
+  const vault2Authority = pda([Buffer.from("vault"), mint2.toBuffer()]);
+  const vault2Ata = (await getOrCreateAssociatedTokenAccount(conn, payer, mint2, vault2Authority, true)).address;
+
   const tree = pda([Buffer.from("tree")]);
   const nullifiers = pda([Buffer.from("nullifiers")]);
   console.log(`program ${programId.toBase58()}\nmint ${mint.toBase58()}`);
@@ -76,12 +85,12 @@ async function main() {
 
   // --- deposit (tag 1, bin includes tag) ---
   const depositData = fs.readFileSync(depositBin);
-  const depositIx = (data) => new TransactionInstruction({
+  const depositIx = (data, depAta = depositorAta, vAta = vaultAta) => new TransactionInstruction({
     programId, data,
     keys: [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },     // depositor
-      { pubkey: depositorAta, isSigner: false, isWritable: true },
-      { pubkey: vaultAta, isSigner: false, isWritable: true },
+      { pubkey: depAta, isSigner: false, isWritable: true },
+      { pubkey: vAta, isSigner: false, isWritable: true },
       { pubkey: tree, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
@@ -93,7 +102,10 @@ async function main() {
   await send(depositIx(depositData));
   await send(depositIx(fs.readFileSync(depositBBin)));
   if (await bal(vaultAta) !== 2n * AMOUNT) throw new Error("vault != 2*amount after two deposits");
-  console.log(`  OK  deposit A + B: vault holds ${2n * AMOUNT}`);
+  // Note C into the OTHER token's vault (Test 6).
+  await send(depositIx(fs.readFileSync(depositCBin), depositor2Ata, vault2Ata));
+  if (await bal(vault2Ata) !== AMOUNT) throw new Error("mint2 vault != amount after deposit C");
+  console.log(`  OK  deposit A + B (mint1) + C (mint2): vaults ${2n * AMOUNT} / ${AMOUNT}`);
 
   // --- withdraw (tag 2) ---
   const withdrawData = fs.readFileSync(withdrawBin);
@@ -120,14 +132,16 @@ async function main() {
   if (await bal(recipientAta) !== AMOUNT || await bal(vaultAta) !== AMOUNT) {
     throw new Error("balances after withdraw incorrect");
   }
-  console.log(`  OK  withdraw A (stale root): recipient got ${AMOUNT}, note B's ${AMOUNT} untouched`);
+  // Test 6: the mint2 vault must be completely untouched by a mint1 withdraw.
+  if (await bal(vault2Ata) !== AMOUNT) throw new Error("mint2 vault touched by mint1 withdraw");
+  console.log(`  OK  withdraw A (stale root): recipient ${AMOUNT}; note B + mint2 vault untouched`);
 
   // --- double-spend: same nullifier must be rejected ---
   await expectFail(withdrawIx(withdrawData), "double-spend (nullifier reuse)");
 
   console.log(
-    "\nM8 PASSED — two-note round-trip + stale-root (Test 4) + note isolation" +
-    " + forged-input + wrong-recipient + double-spend, all on-chain."
+    "\nM8 PASSED — round-trip + stale-root (T4) + multi-token isolation (T6)" +
+    " + forged-input (T3) + wrong-recipient + double-spend (T2), all on-chain."
   );
 }
 
