@@ -1,0 +1,19 @@
+# Native Solana program (NOT Anchor — per project preference).
+# Standalone workspace; build: cargo build-sbf --tools-version v1.54
+[workspace]
+
+[package]
+name = "opaq"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+solana-program = "3"
+borsh = "1"
