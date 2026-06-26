@@ -32,6 +32,19 @@ async function send(ix, signers = [payer]) {
 }
 const bal = async (ata) => (await getAccount(conn, ata)).amount;
 
+async function expectFail(ix, label) {
+  let ok = false;
+  try { await send(ix); } catch { ok = true; }
+  if (!ok) throw new Error(`negative control FAILED: ${label} was accepted`);
+  console.log(`  OK  ${label} rejected`);
+}
+// Overwrite the 8-byte LE amount at `off` with a different value (forge attempt).
+function forgeAmount(buf, off) {
+  const b = Buffer.from(buf);
+  b.writeBigUInt64LE(9999n, off);
+  return b;
+}
+
 async function main() {
   await conn.confirmTransaction(
     await conn.requestAirdrop(payer.publicKey, 5 * LAMPORTS_PER_SOL), "confirmed");
@@ -62,8 +75,9 @@ async function main() {
   console.log("  OK  initialize_pool");
 
   // --- deposit (tag 1, bin includes tag) ---
-  await send(new TransactionInstruction({
-    programId, data: fs.readFileSync(depositBin),
+  const depositData = fs.readFileSync(depositBin);
+  const depositIx = (data) => new TransactionInstruction({
+    programId, data,
     keys: [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },     // depositor
       { pubkey: depositorAta, isSigner: false, isWritable: true },
@@ -71,37 +85,45 @@ async function main() {
       { pubkey: tree, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
-  }));
+  });
+  // Test 3 (forged input): claim a different amount than the proof was made for.
+  await expectFail(depositIx(forgeAmount(depositData, 1 + 256 + 32)), "forged-amount deposit");
+  await send(depositIx(depositData));
   if (await bal(vaultAta) !== AMOUNT) throw new Error("vault balance after deposit != amount");
   console.log(`  OK  deposit: vault holds ${AMOUNT}`);
 
   // --- withdraw (tag 2) ---
-  const withdrawIx = () => new TransactionInstruction({
-    programId, data: fs.readFileSync(withdrawBin),
+  const withdrawData = fs.readFileSync(withdrawBin);
+  const withdrawIx = (data, recipAta = recipientAta) => new TransactionInstruction({
+    programId, data,
     keys: [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: vaultAuthority, isSigner: false, isWritable: false },
       { pubkey: vaultAta, isSigner: false, isWritable: true },
-      { pubkey: recipientAta, isSigner: false, isWritable: true },
+      { pubkey: recipAta, isSigner: false, isWritable: true },
       { pubkey: tree, isSigner: false, isWritable: false },
       { pubkey: nullifiers, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
   });
-  await send(withdrawIx());
+  // Test 3 (withdraw): forged amount must be rejected at proof verification.
+  await expectFail(withdrawIx(forgeAmount(withdrawData, 1 + 256 + 96)), "forged-amount withdraw");
+  // Recipient-binding: paying a token account not owned by the bound recipient.
+  await expectFail(withdrawIx(withdrawData, depositorAta), "wrong-recipient withdraw");
+  await send(withdrawIx(withdrawData));
   if (await bal(recipientAta) !== AMOUNT || await bal(vaultAta) !== 0n) {
     throw new Error("balances after withdraw incorrect");
   }
   console.log(`  OK  withdraw: recipient got ${AMOUNT}, vault drained`);
 
   // --- double-spend: same nullifier must be rejected ---
-  let rejected = false;
-  try { await send(withdrawIx()); } catch { rejected = true; }
-  if (!rejected) throw new Error("DOUBLE-SPEND ACCEPTED — nullifier not enforced");
-  console.log("  OK  double-spend rejected (nullifier enforced)");
+  await expectFail(withdrawIx(withdrawData), "double-spend (nullifier reuse)");
 
-  console.log("\nM8 PASSED — deposit/withdraw round-trip + double-spend rejection on-chain.");
+  console.log(
+    "\nM8 PASSED — round-trip + forged-input (deposit & withdraw) + wrong-recipient" +
+    " + double-spend all enforced on-chain."
+  );
 }
 
 main().catch((e) => { console.error("FAILED:", e.message || e); process.exit(1); });
