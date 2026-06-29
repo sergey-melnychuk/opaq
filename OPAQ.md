@@ -903,9 +903,13 @@ in the tested node helpers (tests/{read_leaves,recipient_history,submit_*}.mjs)
 the CLI orchestrates; the on-chain instruction layout is a single shared lib fn
 (`groth16_verify::opaq_instruction`).
 
-**4. Phase 1.5 optimizations (non-blocking).** Sorted/hash-table nullifier set
-(B.2 — replaces the O(n) linear scan), and benchmark per-tx CU precisely
-(A.10). Worth doing before mainnet scale, not before correctness.
+**4. Phase 1.5 optimizations (non-blocking).** CU **measured** (A.10, via m10 on a
+validator): deposit ~127.6k CU, withdraw ~124.0k CU, and the O(n) nullifier
+linear-scan marginal is only **~31 CU/nullifier**. With ~1.276M CU of headroom
+under the 1.4M ceiling, a withdraw stays in budget until **~41k nullifiers** — so
+the sorted/hash-table nullifier set (B.2, replacing the scan) is confirmed
+*non-blocking*: needed before mainnet scale, not before correctness. (Account
+size is the other ceiling: 10 MB ÷ 32 B ≈ 327k nullifiers.)
 
 **5. Phase 2 — private transfer + hidden amounts (A.6).** The big privacy win:
 `transfer.nr` N-input/M-output join-split with per-`token_id` value

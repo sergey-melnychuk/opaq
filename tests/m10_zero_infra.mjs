@@ -44,6 +44,12 @@ async function send(ix, signers = [payer]) {
 }
 const bal = async (ata) => (await getAccount(conn, ata)).amount;
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+// A.10 CU measurement: compute units a confirmed tx actually consumed.
+const cuOf = async (sig) => {
+  const t = await conn.getTransaction(sig, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+  return t?.meta?.computeUnitsConsumed ?? null;
+};
+const sigFrom = (s) => (s.match(/tx (\w+)/) || [])[1];
 
 async function main() {
   await conn.confirmTransaction(
@@ -181,6 +187,7 @@ async function main() {
   assert(submitRun.status === 0, `--submit withdraw failed: ${submitRun.stderr}`);
   assert(/withdraw submitted ✓ tx \w+/.test(submitRun.stdout), `no tx signature in:\n${submitRun.stdout}`);
   console.log("  OK  CLI proved + signed + broadcast the withdraw itself (M9a auto-submit)");
+  const cuW0 = await cuOf(sigFrom(submitRun.stdout)); // withdraw at nullifier-set size 0
 
   assert(await bal(recipientAta) === AMOUNT, "recipient did not receive funds via reconstructed-path withdraw");
   assert(await bal(vaultAta) === AMOUNT, "vault should retain note B's funds");
@@ -210,8 +217,33 @@ async function main() {
   assert(/deposit submitted ✓ tx \w+/.test(depRun.stdout), `no deposit tx signature in:\n${depRun.stdout}`);
   assert(await bal(vaultAta) === vaultBefore + AMOUNT, "vault did not grow by the deposited amount");
   console.log("  OK  CLI generated + proved + broadcast a deposit itself (M9a deposit auto-submit)");
+  const cuD = await cuOf(sigFrom(depRun.stdout));
 
-  [leavesFile, witnessFile, wdBin, payerFile, depNote, depBin].forEach((p) => fs.rmSync(p, { force: true }));
+  // --- A.10 CU benchmark: withdraw the just-deposited note to get a second data
+  // point at nullifier-set size 1, so the linear-scan marginal is measurable. ---
+  const wd2Bin = path.join(os.tmpdir(), `opaq-wd2-${process.pid}.bin`);
+  const wd2Run = spawnSync(opaqBin, [
+    "withdraw", "--note", depNote, "--recipient", recipient.publicKey.toBase58(),
+    "--rpc", rpc, "--program", programId.toBase58(),
+    "--submit", "--payer", payerFile, "--zkey", WZKEY, "--out", wd2Bin,
+  ], { encoding: "utf8", env: {
+    ...process.env,
+    OPAQ_READ_SCRIPT: `${R}/tests/read_leaves.mjs`,
+    OPAQ_RECIPIENT_SCRIPT: `${R}/tests/recipient_history.mjs`,
+    OPAQ_SUBMIT_SCRIPT: `${R}/tests/submit_withdraw.mjs`,
+  } });
+  assert(wd2Run.status === 0, `2nd withdraw (CU point) failed: ${wd2Run.stderr}`);
+  const cuW1 = await cuOf(sigFrom(wd2Run.stdout)); // withdraw at nullifier-set size 1
+
+  const CEIL = 1_400_000;
+  console.log("\n  CU per tx (A.10):");
+  console.log(`    deposit              ${cuD}`);
+  console.log(`    withdraw  n=0        ${cuW0}`);
+  console.log(`    withdraw  n=1        ${cuW1}`);
+  console.log(`    linear-scan marginal ~${cuW1 - cuW0} CU / nullifier`);
+  console.log(`    headroom             ${CEIL - Math.max(cuW0, cuW1)} CU under the ${CEIL} ceiling`);
+
+  [leavesFile, witnessFile, wdBin, wd2Bin, payerFile, depNote, depBin].forEach((p) => fs.rmSync(p, { force: true }));
   console.log("\nM10 PASSED — zero-infra read path: Merkle path reconstructed from a clean" +
     " RPC-only client, then USED to withdraw on-chain (funds moved).");
 }
