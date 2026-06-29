@@ -105,3 +105,48 @@ pub fn vk_from_json(v: &Value) -> VkBytes {
 pub fn public_from_json(v: &Value) -> Vec<[u8; 32]> {
     v.as_array().expect("public array").iter().map(|x| fr_be(s(x))).collect()
 }
+
+/// Public-input fields for an opaq program instruction. Deposit uses
+/// (mint, amount, commitment); withdraw uses (merkle_root, nullifier, mint,
+/// amount, recipient). Unused fields for a given circuit are ignored.
+#[derive(Default)]
+pub struct OpaqFields {
+    pub mint: [u8; 32],
+    pub amount: u64,
+    pub commitment: [u8; 32],
+    pub nullifier: [u8; 32],
+    pub merkle_root: [u8; 32],
+    pub recipient: [u8; 32],
+}
+
+/// Build the instruction data the opaq program expects (single source of truth
+/// for the on-chain layout in programs/opaq/src/lib.rs):
+///   deposit  (tag 1): proof_a(64) proof_b(128) proof_c(64) mint(32) amount(8 LE) commitment(32)
+///   withdraw (tag 2): proof… merkle_root(32) nullifier(32) mint(32) amount(8 LE) recipient(32)
+pub fn opaq_instruction(circuit: &str, p: &ProofBytes, f: &OpaqFields) -> Result<Vec<u8>, String> {
+    let mut data = Vec::new();
+    match circuit {
+        "deposit" => {
+            data.push(1u8);
+            data.extend_from_slice(&p.a);
+            data.extend_from_slice(&p.b);
+            data.extend_from_slice(&p.c);
+            data.extend_from_slice(&f.mint);
+            data.extend_from_slice(&f.amount.to_le_bytes());
+            data.extend_from_slice(&f.commitment);
+        }
+        "withdraw" => {
+            data.push(2u8);
+            data.extend_from_slice(&p.a);
+            data.extend_from_slice(&p.b);
+            data.extend_from_slice(&p.c);
+            data.extend_from_slice(&f.merkle_root);
+            data.extend_from_slice(&f.nullifier);
+            data.extend_from_slice(&f.mint);
+            data.extend_from_slice(&f.amount.to_le_bytes());
+            data.extend_from_slice(&f.recipient);
+        }
+        other => return Err(format!("circuit must be deposit|withdraw, got {other}")),
+    }
+    Ok(data)
+}

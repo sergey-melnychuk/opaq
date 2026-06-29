@@ -887,8 +887,10 @@ is as dangerous as a program bug. Owning a minimal, auditable ACIR→R1CS for ju
 `AssertZero` + `RANGE` (the only opcodes our circuits emit) is the cleaner
 long-term alternative to maintaining/auditing the general-purpose fork.
 
-**3. Finish M9 (prover CLI polish).** Remaining: (a) prove + submit deposits and
-withdraws itself (currently it emits public inputs / hands off to the scripts).
+**3. Finish M9 (prover CLI polish).** Remaining: (a) auto-*submit* (sign +
+broadcast the tx) — `opaq withdraw --prove` already generates the Groth16 proof
+and emits the ready-to-submit instruction blob itself (prove-only, verified by
+m10 submitting the CLI-built blob on-chain); broadcasting it is the last step.
 **(b) and (c) are DONE.** (b): `opaq withdraw --rpc <url> --program <id>` harvests
 the leaf set live from chain (orchestrating the tested node read path) and
 reconstructs the Merkle path against any pool state, closing the fresh-program

@@ -134,26 +134,47 @@ fn withdraw(f: &HashMap<String, String>) -> R {
         println!("  leaf_index {leaf_index} (located in on-chain leaf set)");
         println!("  merkle_root 0x{}", hex::encode(merkle_root));
 
+        // The circuit inputs for this reconstructed path (always built; written to
+        // --inputs-out and/or proved with --prove below).
+        let path: Vec<String> = siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect();
+        let idx: Vec<String> = right.iter().map(|b| b.to_string()).collect();
+        let inputs = format!(
+            "{{\"merkle_root\":\"{}\",\"nullifier\":\"{}\",\"token_id\":\"{}\",\
+             \"amount\":\"{}\",\"recipient\":\"{}\",\"spend_key\":\"{}\",\
+             \"blinding_factor\":\"{}\",\"merkle_path\":[{}],\
+             \"merkle_path_indices\":[{}]}}",
+            field_hex(&merkle_root),
+            field_hex(&nullifier),
+            field_hex(&token_id),
+            field_hex(&be32(amount as u128)),
+            field_hex(&recipient_field),
+            field_hex(&spend_key),
+            field_hex(&blinding),
+            path.join(","),
+            idx.join(","),
+        );
         if let Some(p) = f.get("inputs-out") {
-            let path: Vec<String> = siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect();
-            let idx: Vec<String> = right.iter().map(|b| b.to_string()).collect();
-            let inputs = format!(
-                "{{\"merkle_root\":\"{}\",\"nullifier\":\"{}\",\"token_id\":\"{}\",\
-                 \"amount\":\"{}\",\"recipient\":\"{}\",\"spend_key\":\"{}\",\
-                 \"blinding_factor\":\"{}\",\"merkle_path\":[{}],\
-                 \"merkle_path_indices\":[{}]}}",
-                field_hex(&merkle_root),
-                field_hex(&nullifier),
-                field_hex(&token_id),
-                field_hex(&be32(amount as u128)),
-                field_hex(&recipient_field),
-                field_hex(&spend_key),
-                field_hex(&blinding),
-                path.join(","),
-                idx.join(","),
-            );
             std::fs::write(p, &inputs).map_err(|e| format!("write {p}: {e}"))?;
             println!("withdraw circuit inputs -> {p}");
+        }
+
+        // M9(a) prove-only: generate the Groth16 proof and assemble the ready-to-
+        // submit instruction blob, orchestrating the same tested toolchain the test
+        // harness uses (groth16-prove-note.sh + emit_opaq_instruction).
+        if f.contains_key("prove") {
+            let out = f.get("out").map(String::as_str).unwrap_or("withdraw.bin");
+            let sidecar = format!(
+                "{{\"merkle_root\":\"{}\",\"nullifier\":\"{}\",\"mint_hex\":\"{}\",\
+                 \"amount\":{},\"recipient_hex\":\"{}\",\"commitment\":\"{}\"}}",
+                hex::encode(merkle_root),
+                hex::encode(nullifier),
+                hex::encode(mint),
+                amount,
+                hex::encode(recipient),
+                "00".repeat(32), // unused by withdraw; emit_opaq_instruction still parses it
+            );
+            prove_and_emit("withdraw", &inputs, &sidecar, out, f)?;
+            println!("withdraw instruction blob -> {out} (submit with `opaq` or a node tx)");
         }
     } else {
         println!(
@@ -224,6 +245,58 @@ fn harvest_leaves(rpc: &str, program: &str) -> Result<Vec<[u8; 32]>, String> {
         ));
     }
     parse_leaves(&out.stdout)
+}
+
+/// Prove a circuit's reconstructed inputs and assemble the on-chain instruction
+/// blob, orchestrating the tested toolchain (scripts/groth16-prove-note.sh + the
+/// emit_opaq_instruction bin — kept as the single source of the on-chain layout).
+/// Repo root via $OPAQ_ROOT (default "."); the fixed zkey via --zkey or
+/// $OPAQ_<CIRCUIT>_ZKEY.
+fn prove_and_emit(
+    circuit: &str,
+    inputs: &str,
+    sidecar: &str,
+    out: &str,
+    f: &HashMap<String, String>,
+) -> R {
+    let root = std::env::var("OPAQ_ROOT").unwrap_or_else(|_| ".".to_string());
+    let zkey = f
+        .get("zkey")
+        .cloned()
+        .or_else(|| std::env::var(format!("OPAQ_{}_ZKEY", circuit.to_uppercase())).ok())
+        .ok_or_else(|| {
+            format!("--zkey <circuit.zkey> (or $OPAQ_{}_ZKEY) required for --prove", circuit.to_uppercase())
+        })?;
+
+    let tmp = std::env::temp_dir();
+    let pid = std::process::id();
+    let inputs_path = tmp.join(format!("opaq-{circuit}-inputs-{pid}.json"));
+    let sidecar_path = tmp.join(format!("opaq-{circuit}-sidecar-{pid}.json"));
+    let provedir = tmp.join(format!("opaq-{circuit}-prove-{pid}"));
+    std::fs::write(&inputs_path, inputs).map_err(|e| format!("write inputs: {e}"))?;
+    std::fs::write(&sidecar_path, sidecar).map_err(|e| format!("write sidecar: {e}"))?;
+
+    run("bash", &[
+        &format!("{root}/scripts/groth16-prove-note.sh"),
+        circuit, &zkey, inputs_path.to_str().unwrap(), provedir.to_str().unwrap(),
+    ])?;
+    run("cargo", &[
+        "run", "-q", "--manifest-path", &format!("{root}/crates/groth16-verify/Cargo.toml"),
+        "--bin", "emit_opaq_instruction", "--",
+        circuit, provedir.to_str().unwrap(), sidecar_path.to_str().unwrap(), out,
+    ])
+}
+
+/// Spawn a command inheriting stdio, erroring on non-zero exit.
+fn run(cmd: &str, args: &[&str]) -> R {
+    let st = std::process::Command::new(cmd)
+        .args(args)
+        .status()
+        .map_err(|e| format!("spawn {cmd}: {e}"))?;
+    if !st.success() {
+        return Err(format!("`{cmd} {}` failed", args.join(" ")));
+    }
+    Ok(())
 }
 
 /// Look up a recipient's prior on-chain signature count over plain RPC (A.8), via

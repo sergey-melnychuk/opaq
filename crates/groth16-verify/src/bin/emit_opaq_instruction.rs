@@ -7,7 +7,7 @@
 
 use std::{fs, path::PathBuf};
 
-use groth16_verify::proof_from_json;
+use groth16_verify::{opaq_instruction, proof_from_json, OpaqFields};
 use serde_json::Value;
 
 fn hex32(s: &str) -> [u8; 32] {
@@ -25,37 +25,16 @@ fn main() {
         serde_json::from_str(&fs::read_to_string(proof_dir.join("proof.json")).unwrap()).unwrap();
     let p = proof_from_json(&proof_json);
 
-    let mint = hex32(sidecar["mint_hex"].as_str().unwrap());
-    let amount = sidecar["amount"].as_u64().unwrap();
-    let commitment = hex32(sidecar["commitment"].as_str().unwrap());
-    let nullifier = hex32(sidecar["nullifier"].as_str().unwrap());
-    let merkle_root = hex32(sidecar["merkle_root"].as_str().unwrap());
-    let recipient = hex32(sidecar["recipient_hex"].as_str().unwrap());
+    let fields = OpaqFields {
+        mint: hex32(sidecar["mint_hex"].as_str().unwrap()),
+        amount: sidecar["amount"].as_u64().unwrap(),
+        commitment: hex32(sidecar["commitment"].as_str().unwrap()),
+        nullifier: hex32(sidecar["nullifier"].as_str().unwrap()),
+        merkle_root: hex32(sidecar["merkle_root"].as_str().unwrap()),
+        recipient: hex32(sidecar["recipient_hex"].as_str().unwrap()),
+    };
 
-    let mut data = Vec::new();
-    match circuit {
-        "deposit" => {
-            data.push(1u8);
-            data.extend_from_slice(&p.a);
-            data.extend_from_slice(&p.b);
-            data.extend_from_slice(&p.c);
-            data.extend_from_slice(&mint);
-            data.extend_from_slice(&amount.to_le_bytes());
-            data.extend_from_slice(&commitment);
-        }
-        "withdraw" => {
-            data.push(2u8);
-            data.extend_from_slice(&p.a);
-            data.extend_from_slice(&p.b);
-            data.extend_from_slice(&p.c);
-            data.extend_from_slice(&merkle_root);
-            data.extend_from_slice(&nullifier);
-            data.extend_from_slice(&mint);
-            data.extend_from_slice(&amount.to_le_bytes());
-            data.extend_from_slice(&recipient);
-        }
-        _ => panic!("circuit must be deposit|withdraw"),
-    }
+    let data = opaq_instruction(circuit, &p, &fields).unwrap();
     fs::write(&out, &data).unwrap();
     println!("wrote {} ({} bytes)", out.display(), data.len());
 }

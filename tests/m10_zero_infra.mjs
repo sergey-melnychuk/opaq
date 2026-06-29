@@ -153,24 +153,28 @@ async function main() {
   assert(w.merkle_root === `0x${root}`, "witness root must match the printed root");
   console.log("  OK  emitted a complete depth-24 withdraw witness");
 
-  // --- close the loop: prove the RECONSTRUCTED witness + submit a real withdraw ---
-  const { OPAQ_ROOT: R, OPAQ_VKMF: VKMF, OPAQ_WITHDRAW_ZKEY: WZKEY } = process.env;
-  const provedir = path.join(os.tmpdir(), `opaq-wdprove-${process.pid}`);
-  execFileSync("bash", [`${R}/scripts/groth16-prove-note.sh`, "withdraw", WZKEY, witnessFile, provedir],
-    { env: process.env, stdio: "pipe" });
-  const sidecar = {
-    merkle_root: w.merkle_root.replace(/^0x/, ""),
-    nullifier: w.nullifier.replace(/^0x/, ""),
-    mint_hex: Buffer.from(mint.toBytes()).toString("hex"),
-    amount: Number(AMOUNT),
-    recipient_hex: Buffer.from(recipient.publicKey.toBytes()).toString("hex"),
-    commitment: "00".repeat(32), // unused by withdraw, but emit_opaq_instruction parses it
-  };
-  const sidecarFile = path.join(os.tmpdir(), `opaq-wdside-${process.pid}.json`);
+  // --- close the loop: M9(a) prove-only — the CLI reconstructs (via --rpc),
+  // proves the withdraw, and emits the ready-to-submit blob ITSELF (no manual
+  // prove+emit). Submitting that blob on-chain below is the verification. ---
+  const { OPAQ_ROOT: R, OPAQ_WITHDRAW_ZKEY: WZKEY } = process.env;
   const wdBin = path.join(os.tmpdir(), `opaq-wd-${process.pid}.bin`);
-  fs.writeFileSync(sidecarFile, JSON.stringify(sidecar));
-  execFileSync("cargo", ["run", "-q", "--manifest-path", VKMF, "--bin", "emit_opaq_instruction",
-    "--", "withdraw", provedir, sidecarFile, wdBin], { cwd: R, env: process.env, stdio: "pipe" });
+  const proveRun = spawnSync(opaqBin, [
+    "withdraw",
+    "--note", noteAPath,
+    "--recipient", recipient.publicKey.toBase58(),
+    "--rpc", rpc,
+    "--program", programId.toBase58(),
+    "--prove",
+    "--zkey", WZKEY,
+    "--out", wdBin,
+  ], { encoding: "utf8", env: {
+    ...process.env,
+    OPAQ_READ_SCRIPT: `${R}/tests/read_leaves.mjs`,
+    OPAQ_RECIPIENT_SCRIPT: `${R}/tests/recipient_history.mjs`,
+  } });
+  assert(proveRun.status === 0, `--prove withdraw failed: ${proveRun.stderr}`);
+  assert(fs.existsSync(wdBin), "--prove did not emit an instruction blob");
+  console.log("  OK  CLI proved the withdraw + emitted the instruction blob (M9a)");
 
   const recipientAta = (await getOrCreateAssociatedTokenAccount(conn, payer, mint, recipient.publicKey)).address;
   await send(new TransactionInstruction({
@@ -190,7 +194,7 @@ async function main() {
   assert(await bal(vaultAta) === AMOUNT, "vault should retain note B's funds");
   console.log(`  OK  withdraw via RECONSTRUCTED path: recipient got ${AMOUNT}, note B untouched`);
 
-  [leavesFile, witnessFile, sidecarFile, wdBin].forEach((p) => fs.rmSync(p, { force: true }));
+  [leavesFile, witnessFile, wdBin].forEach((p) => fs.rmSync(p, { force: true }));
   console.log("\nM10 PASSED — zero-infra read path: Merkle path reconstructed from a clean" +
     " RPC-only client, then USED to withdraw on-chain (funds moved).");
 }
