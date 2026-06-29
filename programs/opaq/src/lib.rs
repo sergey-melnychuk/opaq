@@ -25,6 +25,7 @@ use solana_program::{
 
 mod tree_consts;
 mod vk_deposit;
+mod vk_transfer;
 mod vk_withdraw;
 use tree_consts::{EMPTY_ROOT, ZEROS};
 
@@ -90,6 +91,15 @@ const WITHDRAW_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     vk_gamme_g2: vk_withdraw::VK_GAMME_G2,
     vk_delta_g2: vk_withdraw::VK_DELTA_G2,
     vk_ic: &vk_withdraw::VK_IC,
+};
+
+const TRANSFER_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
+    nr_pubinputs: 5, // merkle_root, nullifier[2], out_commitment[2]
+    vk_alpha_g1: vk_transfer::VK_ALPHA_G1,
+    vk_beta_g2: vk_transfer::VK_BETA_G2,
+    vk_gamme_g2: vk_transfer::VK_GAMME_G2,
+    vk_delta_g2: vk_transfer::VK_DELTA_G2,
+    vk_ic: &vk_transfer::VK_IC,
 };
 
 /// Original Poseidon hash of two field elements (== the circuit's hash_2 and
@@ -242,6 +252,7 @@ pub fn process_instruction(
     match tag {
         0 => initialize_pool(program_id, accounts),
         1 => deposit(program_id, accounts, args),
+        3 => transfer(program_id, accounts, args),
         2 => withdraw(program_id, accounts, args),
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -552,5 +563,76 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progr
     )?;
 
     msg!("opaq: withdraw ok");
+    Ok(())
+}
+
+/// Transfer (Phase 2): a fully-private 2-in/2-out join-split — verify the proof,
+/// check the root is recent, record both input nullifiers, insert both output
+/// commitments. NO vault movement: value stays in the pool (the circuit enforces
+/// Σin == Σout for a single private token_id), so amounts/token never appear.
+/// Accounts: [payer (signer,w), commitment_tree (w), nullifier_set (w), system_program]
+/// Args (416): proof_a(64) proof_b(128) proof_c(64) merkle_root(32)
+///             nullifier0(32) nullifier1(32) out_commitment0(32) out_commitment1(32)
+#[inline(never)]
+fn transfer(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
+    if args.len() != 64 + 128 + 64 + 32 + 32 + 32 + 32 + 32 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let proof_a: [u8; 64] = args[0..64].try_into().unwrap();
+    let proof_b: [u8; 128] = args[64..192].try_into().unwrap();
+    let proof_c: [u8; 64] = args[192..256].try_into().unwrap();
+    let merkle_root: [u8; 32] = args[256..288].try_into().unwrap();
+    let nullifier0: [u8; 32] = args[288..320].try_into().unwrap();
+    let nullifier1: [u8; 32] = args[320..352].try_into().unwrap();
+    let commitment0: [u8; 32] = args[352..384].try_into().unwrap();
+    let commitment1: [u8; 32] = args[384..416].try_into().unwrap();
+
+    // Public inputs in circuit order (B.4.3). Value conservation, range checks,
+    // shared token_id, membership, and the nullifier/commitment bindings are all
+    // enforced inside the proof — the program only records its public effects.
+    let public = [merkle_root, nullifier0, nullifier1, commitment0, commitment1];
+    let mut verifier = Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public, &TRANSFER_VK)
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+    verifier
+        .verify()
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+
+    let iter = &mut accounts.iter();
+    let payer = next_account_info(iter)?;
+    let tree_ai = next_account_info(iter)?;
+    let nullifier_ai = next_account_info(iter)?;
+    let system = next_account_info(iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
+    let (nf_pda, _) = Pubkey::find_program_address(&[NULLIFIER_SEED], program_id);
+    if tree_ai.key != &tree_pda || nullifier_ai.key != &nf_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    if !tree_is_known_root(&tree_ai.data.borrow(), &merkle_root) {
+        return Err(ProgramError::Custom(E_UNKNOWN_ROOT));
+    }
+    // Neither input may be already spent, and the two inputs must be distinct
+    // notes (equal nullifiers == spending the same note twice in one transfer).
+    {
+        let nf_data = nullifier_ai.data.borrow();
+        if nullifier_contains(&nf_data, &nullifier0) || nullifier_contains(&nf_data, &nullifier1) {
+            return Err(ProgramError::Custom(E_ALREADY_SPENT));
+        }
+    }
+    if nullifier0 == nullifier1 {
+        return Err(ProgramError::Custom(E_ALREADY_SPENT));
+    }
+    nullifier_append(payer, nullifier_ai, system, nullifier0)?;
+    nullifier_append(payer, nullifier_ai, system, nullifier1)?;
+
+    // Insert both output commitments (value conserved, so the pool stays balanced).
+    let leaf0 = tree_insert(&mut tree_ai.data.borrow_mut(), commitment0)?;
+    let leaf1 = tree_insert(&mut tree_ai.data.borrow_mut(), commitment1)?;
+
+    msg!("opaq: transfer ok, leaves={},{}", leaf0, leaf1);
     Ok(())
 }
