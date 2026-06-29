@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   Connection, Keypair, PublicKey, SystemProgram, Transaction,
   TransactionInstruction, ComputeBudgetProgram, sendAndConfirmTransaction, LAMPORTS_PER_SOL,
@@ -124,16 +124,27 @@ async function main() {
   // M9: the same withdraw, but harvesting leaves LIVE over RPC (--rpc/--program)
   // instead of a pre-harvested --leaves file. Must reconstruct the identical root
   // — proving the CLI works against any live pool with no external harness.
-  const outRpc = execFileSync(opaqBin, [
+  const rpcRun = spawnSync(opaqBin, [
     "withdraw",
     "--note", noteAPath,
     "--recipient", recipient.publicKey.toBase58(),
     "--rpc", rpc,
     "--program", programId.toBase58(),
-  ], { encoding: "utf8", env: { ...process.env, OPAQ_READ_SCRIPT: `${process.env.OPAQ_ROOT}/tests/read_leaves.mjs` } });
-  const rootRpc = outRpc.match(/merkle_root 0x([0-9a-f]{64})/)?.[1];
+  ], { encoding: "utf8", env: {
+    ...process.env,
+    OPAQ_READ_SCRIPT: `${process.env.OPAQ_ROOT}/tests/read_leaves.mjs`,
+    OPAQ_RECIPIENT_SCRIPT: `${process.env.OPAQ_ROOT}/tests/recipient_history.mjs`,
+  } });
+  assert(rpcRun.status === 0, `--rpc withdraw failed: ${rpcRun.stderr}`);
+  const rootRpc = rpcRun.stdout.match(/merkle_root 0x([0-9a-f]{64})/)?.[1];
   assert(rootRpc === root, `--rpc root ${rootRpc} != --leaves root ${root}`);
   console.log("  OK  --rpc harvest reconstructs the identical root (no leaves file)");
+
+  // M9(c): with --rpc, the A.8 recipient warning is a concrete RPC finding. The
+  // test recipient is brand-new, so it must report FRESH (no prior signatures).
+  assert(/RPC check: no prior signatures seen .* looks FRESH/.test(rpcRun.stderr),
+    `expected a FRESH A.8 RPC finding, got stderr:\n${rpcRun.stderr}`);
+  console.log("  OK  A.8 recipient history auto-checked over RPC (fresh address)");
 
   // The emitted witness is a complete, well-formed withdraw input.
   const w = JSON.parse(fs.readFileSync(witnessFile, "utf8"));

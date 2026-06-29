@@ -163,7 +163,19 @@ fn withdraw(f: &HashMap<String, String>) -> R {
         );
     }
 
-    warn::recipient(&recipient);
+    // A.8: when an RPC endpoint is available, turn the recipient warning from a
+    // static advisory into a concrete fresh/not-fresh finding.
+    let history = match f.get("rpc") {
+        Some(rpc) => match recipient_history(rpc, &bs58::encode(recipient).into_string()) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("  (recipient history check skipped: {e})");
+                None
+            }
+        },
+        None => None,
+    };
+    warn::recipient(&recipient, history);
     warn::amount(amount);
     Ok(())
 }
@@ -212,6 +224,30 @@ fn harvest_leaves(rpc: &str, program: &str) -> Result<Vec<[u8; 32]>, String> {
         ));
     }
     parse_leaves(&out.stdout)
+}
+
+/// Look up a recipient's prior on-chain signature count over plain RPC (A.8), via
+/// the tested node read path. Override the script with $OPAQ_RECIPIENT_SCRIPT
+/// (default: tests/recipient_history.mjs).
+fn recipient_history(rpc: &str, recipient_b58: &str) -> Result<warn::RecipientHistory, String> {
+    let script = std::env::var("OPAQ_RECIPIENT_SCRIPT")
+        .unwrap_or_else(|_| "tests/recipient_history.mjs".to_string());
+    let out = std::process::Command::new("node")
+        .args([&script, rpc, recipient_b58])
+        .output()
+        .map_err(|e| format!("spawn node {script}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "recipient history check failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| "recipient history is not valid JSON")?;
+    Ok(warn::RecipientHistory {
+        count: v["count"].as_u64().ok_or("history missing count")? as usize,
+        capped: v["capped"].as_bool().unwrap_or(false),
+    })
 }
 
 // --- helpers ---

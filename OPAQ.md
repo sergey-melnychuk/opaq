@@ -888,12 +888,13 @@ is as dangerous as a program bug. Owning a minimal, auditable ACIR→R1CS for ju
 long-term alternative to maintaining/auditing the general-purpose fork.
 
 **3. Finish M9 (prover CLI polish).** Remaining: (a) prove + submit deposits and
-withdraws itself (currently it emits public inputs / hands off to the scripts),
-and (c) do a real RPC recipient-history lookup behind the A.8 warning (currently
-advisory). **(b) is DONE** — `opaq withdraw --rpc <url> --program <id>` harvests
+withdraws itself (currently it emits public inputs / hands off to the scripts).
+**(b) and (c) are DONE.** (b): `opaq withdraw --rpc <url> --program <id>` harvests
 the leaf set live from chain (orchestrating the tested node read path) and
 reconstructs the Merkle path against any pool state, closing the fresh-program
-shortcut M11 used; verified by m10 (`--rpc` root == `--leaves` root on-chain).
+shortcut M11 used. (c): the same `--rpc` turns the A.8 recipient warning into a
+concrete fresh/not-fresh finding via a live signature-history lookup. Both
+verified by m10 on a validator (`--rpc` root == `--leaves` root; FRESH finding).
 
 **4. Phase 1.5 optimizations (non-blocking).** Sorted/hash-table nullifier set
 (B.2 — replaces the O(n) linear scan), and benchmark per-tx CU precisely
