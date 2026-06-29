@@ -128,6 +128,90 @@ fn main() {
         ],
     );
 
+    // --- transfer/Prover.toml (Phase 2, P2.1): 2-in/2-out join-split ---
+    // input[0]: the real note above (leaf 0, reusing the withdraw merkle setup).
+    // input[1]: a dummy (amount 0). Split A into out[0]=B (to recipient) + out[1]=
+    // A-B (change back to self), same token_id throughout. Conserves value.
+    let a = amount_u64; // input[0] amount
+    let b = a / 2; // output[0] to recipient
+    let change = a - b; // output[1] back to self
+    let in0_amt = be32(a as u128);
+
+    // input[1]: dummy note (amount 0, skips Merkle membership in-circuit).
+    let in1_sk = be32(111_222_333);
+    let in1_bl = be32(444_555_666);
+    let in1_owner = poseidon_be(&[in1_sk]);
+    let in1_commit = poseidon_be(&[token_id, be32(0), in1_owner, in1_bl]);
+    let in1_nf = poseidon_be(&[in1_commit, in1_sk]);
+
+    // outputs: [0] to recipient (fresh owner), [1] change back to self (owner_pubkey).
+    let out0_owner = poseidon_be(&[be32(777_000_777)]);
+    let out0_bl = be32(555_111_555);
+    let out0_amt = be32(b as u128);
+    let out0_commit = poseidon_be(&[token_id, out0_amt, out0_owner, out0_bl]);
+    let out1_owner = owner_pubkey; // change to self
+    let out1_bl = be32(666_222_666);
+    let out1_amt = be32(change as u128);
+    let out1_commit = poseidon_be(&[token_id, out1_amt, out1_owner, out1_bl]);
+
+    let fh = |x: &[u8; 32]| field_hex(x);
+    let zeros24 = vec!["\"0x00\"".to_string(); TREE_DEPTH].join(", ");
+    let false24 = vec!["false".to_string(); TREE_DEPTH].join(", ");
+    let real_path = siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect::<Vec<_>>().join(", ");
+    let real_idx = right.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ");
+
+    let transfer = format!(
+        "merkle_root = \"{root}\"\n\
+         nullifiers = [\"{nf0}\", \"{nf1}\"]\n\
+         out_commitments = [\"{oc0}\", \"{oc1}\"]\n\
+         token_id = \"{tid}\"\n\
+         in_amount = [\"{ia0}\", \"{ia1}\"]\n\
+         in_spend_key = [\"{isk0}\", \"{isk1}\"]\n\
+         in_blinding = [\"{ib0}\", \"{ib1}\"]\n\
+         in_is_dummy = [false, true]\n\
+         in_merkle_path = [[{rp}], [{z}]]\n\
+         in_merkle_path_indices = [[{ri}], [{f}]]\n\
+         out_amount = [\"{oa0}\", \"{oa1}\"]\n\
+         out_owner_pubkey = [\"{oo0}\", \"{oo1}\"]\n\
+         out_blinding = [\"{ob0}\", \"{ob1}\"]\n",
+        root = fh(&merkle_root), nf0 = fh(&nullifier), nf1 = fh(&in1_nf),
+        oc0 = fh(&out0_commit), oc1 = fh(&out1_commit), tid = fh(&token_id),
+        ia0 = fh(&in0_amt), ia1 = fh(&be32(0)),
+        isk0 = fh(&spend_key), isk1 = fh(&in1_sk),
+        ib0 = fh(&blinding), ib1 = fh(&in1_bl),
+        rp = real_path, z = zeros24, ri = real_idx, f = false24,
+        oa0 = fh(&out0_amt), oa1 = fh(&out1_amt),
+        oo0 = fh(&out0_owner), oo1 = fh(&out1_owner),
+        ob0 = fh(&out0_bl), ob1 = fh(&out1_bl),
+    );
+    write(&circuits_dir, "transfer", &transfer);
+
+    // inputs.json (ABI for noir-cli interop): same values, JSON shape.
+    let real_path_j = siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect::<Vec<_>>().join(",");
+    let zeros24_j = vec!["\"0x00\"".to_string(); TREE_DEPTH].join(",");
+    let false24_j = vec!["false".to_string(); TREE_DEPTH].join(",");
+    let real_idx_j = right.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+    let transfer_json = format!(
+        "{{\"merkle_root\":\"{root}\",\"nullifiers\":[\"{nf0}\",\"{nf1}\"],\
+         \"out_commitments\":[\"{oc0}\",\"{oc1}\"],\"token_id\":\"{tid}\",\
+         \"in_amount\":[\"{ia0}\",\"{ia1}\"],\"in_spend_key\":[\"{isk0}\",\"{isk1}\"],\
+         \"in_blinding\":[\"{ib0}\",\"{ib1}\"],\"in_is_dummy\":[false,true],\
+         \"in_merkle_path\":[[{rp}],[{z}]],\"in_merkle_path_indices\":[[{ri}],[{f}]],\
+         \"out_amount\":[\"{oa0}\",\"{oa1}\"],\"out_owner_pubkey\":[\"{oo0}\",\"{oo1}\"],\
+         \"out_blinding\":[\"{ob0}\",\"{ob1}\"]}}",
+        root = fh(&merkle_root), nf0 = fh(&nullifier), nf1 = fh(&in1_nf),
+        oc0 = fh(&out0_commit), oc1 = fh(&out1_commit), tid = fh(&token_id),
+        ia0 = fh(&in0_amt), ia1 = fh(&be32(0)),
+        isk0 = fh(&spend_key), isk1 = fh(&in1_sk),
+        ib0 = fh(&blinding), ib1 = fh(&in1_bl),
+        rp = real_path_j, z = zeros24_j, ri = real_idx_j, f = false24_j,
+        oa0 = fh(&out0_amt), oa1 = fh(&out1_amt),
+        oo0 = fh(&out0_owner), oo1 = fh(&out1_owner),
+        ob0 = fh(&out0_bl), ob1 = fh(&out1_bl),
+    );
+    fs::write(circuits_dir.join("transfer").join("inputs.json"), transfer_json).unwrap();
+    println!("wrote {}", circuits_dir.join("transfer/inputs.json").display());
+
     // Sidecar for the M8 e2e harness: real instruction args + computed fields.
     let sidecar = format!(
         "{{\"mint_hex\":\"{}\",\"recipient_hex\":\"{}\",\"amount\":{},\

@@ -950,12 +950,14 @@ the sorted/hash-table nullifier set (B.2, replacing the scan) is confirmed
 *non-blocking*: needed before mainnet scale, not before correctness. (Account
 size is the other ceiling: 10 MB ÷ 32 B ≈ 327k nullifiers.)
 
-**5. Phase 2 — private transfer + hidden amounts (A.6). STARTED (P2.0).** The
-circuit `circuits/transfer/src/main.nr` is written + compiling (2-in/2-out
-join-split, private `token_id` + amounts, value conservation; see B.4.3). Next:
-host-parity witness gen + Groth16 prove/verify (ceremony power ~17–18), the
-on-chain `transfer` instruction, `vk_transfer`, `opaq transfer`, and a
-deposit→transfer→withdraw e2e. The big privacy win:
+**5. Phase 2 — private transfer + hidden amounts (A.6). STARTED (P2.0–P2.1).** The
+circuit `circuits/transfer/src/main.nr` is written, and a real host-computed
+witness (a split: 1 real input + 1 dummy → recipient + change) **proves and
+verifies** end-to-end: `gen_witness` emits the transfer witness, `nargo execute`
+solves it (host Poseidon == in-circuit), and Groth16 setup/prove/verify passes at
+**ptau power 17**. Next: on-chain `transfer` instruction (tag 3: verify →
+root-recent → 2 nullifiers → 2 inserts, no vault), `vk_transfer`, `opaq transfer`,
+and a deposit→transfer→withdraw e2e (P2.2–P2.4). The big privacy win:
 `transfer.nr` N-input/M-output join-split with per-`token_id` value
 conservation, which also closes the A.12 limitation (amounts/token are public in
 Phase 1, so the anonymity set is only identical-`(token, amount)` transfers).
