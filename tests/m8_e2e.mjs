@@ -85,18 +85,24 @@ async function main() {
 
   // --- deposit (tag 1, bin includes tag) ---
   const depositData = fs.readFileSync(depositBin);
-  const depositIx = (data, depAta = depositorAta, vAta = vaultAta) => new TransactionInstruction({
-    programId, data,
-    keys: [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },     // depositor
-      { pubkey: depAta, isSigner: false, isWritable: true },
-      { pubkey: vAta, isSigner: false, isWritable: true },
-      { pubkey: tree, isSigner: false, isWritable: true },
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-    ],
-  });
+  const depositIx = (data, depAta = depositorAta, vAta = vaultAta, tokenProg = TOKEN_PROGRAM_ID) =>
+    new TransactionInstruction({
+      programId, data,
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },     // depositor
+        { pubkey: depAta, isSigner: false, isWritable: true },
+        { pubkey: vAta, isSigner: false, isWritable: true },
+        { pubkey: tree, isSigner: false, isWritable: true },
+        { pubkey: tokenProg, isSigner: false, isWritable: false },
+      ],
+    });
   // Test 3 (forged input): claim a different amount than the proof was made for.
   await expectFail(depositIx(forgeAmount(depositData, 1 + 256 + 32)), "forged-amount deposit");
+  // Audit fix: a forged token_program must be rejected — otherwise a no-op
+  // "transfer" would let a deposit insert a commitment WITHOUT funding the vault,
+  // then drain it on withdraw. Pass the System program in the token_program slot.
+  await expectFail(depositIx(depositData, depositorAta, vaultAta, SystemProgram.programId),
+    "forged token_program deposit");
   // Note A, then note B (distinct commitment, same fixed VK) — B moves the root
   // so the later withdraw of A exercises stale-root tolerance (Test 4).
   await send(depositIx(depositData));
@@ -141,7 +147,7 @@ async function main() {
 
   console.log(
     "\nM8 PASSED — round-trip + stale-root (T4) + multi-token isolation (T6)" +
-    " + forged-input (T3) + wrong-recipient + double-spend (T2), all on-chain."
+    " + forged-input (T3) + forged-token_program + wrong-recipient + double-spend (T2), all on-chain."
   );
 }
 

@@ -42,6 +42,18 @@ pub const E_ALREADY_SPENT: u32 = 3;
 pub const E_UNKNOWN_ROOT: u32 = 4;
 pub const E_WRONG_VAULT: u32 = 5;
 pub const E_WRONG_RECIPIENT: u32 = 6;
+pub const E_WRONG_MINT: u32 = 7;
+
+/// SPL Token program id (`Tokenkeg…`). Funds only ever move via a CPI to THIS
+/// program, so it must be validated: otherwise a no-op/forged "token program"
+/// passed by the caller lets a deposit insert a commitment WITHOUT an actual
+/// transfer into the vault — a pool-drain vector. The real token program also
+/// re-validates every token account it touches, so pinning it closes the whole
+/// account-confusion class.
+pub const SPL_TOKEN_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172,
+    28, 180, 133, 237, 95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
+]);
 
 const DEPOSIT_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     nr_pubinputs: 3,
@@ -385,6 +397,11 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progra
     if !depositor.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
+    // Funds move only via this CPI: a forged token_program would let the transfer
+    // be a no-op while the commitment is still inserted — a fake, unfunded deposit.
+    if token_program.key != &SPL_TOKEN_PROGRAM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
     let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
     if tree_ai.key != &tree_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -394,6 +411,11 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progra
     // drain the real vault.
     let (vault_authority, _) = Pubkey::find_program_address(&[VAULT_SEED, &token_id], program_id);
     check_vault(vault_token, &token_id, &vault_authority)?;
+    // depositor_token must be the same mint (defense-in-depth; the token program
+    // also enforces mint equality on transfer).
+    if depositor_token.data.borrow().get(0..32) != Some(&token_id[..]) {
+        return Err(ProgramError::Custom(E_WRONG_MINT));
+    }
 
     // Move exactly `amount` (the proof-bound amount) depositor -> vault.
     spl_transfer(token_program, depositor_token, vault_token, depositor, amount, &[])?;
@@ -453,6 +475,11 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progr
     if !payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
+    // Funds move only via this CPI (vault -> recipient); pin the token program so
+    // a forged one can't intercept the release or skip the real account checks.
+    if token_program.key != &SPL_TOKEN_PROGRAM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
     let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
     let (nf_pda, _) = Pubkey::find_program_address(&[NULLIFIER_SEED], program_id);
     let (vault_auth_pda, vault_bump) =
@@ -465,11 +492,15 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progr
     }
     check_vault(vault_token, &token_id, &vault_auth_pda)?;
     // recipient_token must be owned by the proof-bound recipient — otherwise the
-    // recipient public input is toothless and a submitter could redirect funds.
+    // recipient public input is toothless and a submitter could redirect funds —
+    // and be the same mint (defense-in-depth; the token program also enforces it).
     {
         let rt = recipient_token.data.borrow();
         if rt.len() < 64 || rt[32..64] != recipient {
             return Err(ProgramError::Custom(E_WRONG_RECIPIENT));
+        }
+        if rt[0..32] != token_id {
+            return Err(ProgramError::Custom(E_WRONG_MINT));
         }
     }
 

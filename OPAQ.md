@@ -887,6 +887,14 @@ is as dangerous as a program bug. Owning a minimal, auditable ACIR→R1CS for ju
 `AssertZero` + `RANGE` (the only opcodes our circuits emit) is the cleaner
 long-term alternative to maintaining/auditing the general-purpose fork.
 
+> A first focused pass on (a) already found + fixed one **critical** bug: the
+> SPL `token_program` was taken from the caller and invoked unchecked, so a
+> forged/no-op token program let a deposit insert a commitment WITHOUT funding
+> the vault (drain on withdraw). Now both instructions pin `SPL_TOKEN_PROGRAM_ID`
+> (+ mint-binding defense-in-depth), with an m8 negative test
+> ("forged token_program deposit rejected"). A full external audit is still
+> required — this was a self-review, not a substitute.
+
 **3. Finish M9 (prover CLI polish) — DONE.** The `opaq` CLI now drives the full
 lifecycle itself, both directions, verified end-to-end by m10 on a validator:
 - `opaq deposit --token <mint> --amount <n> --note <f> --rpc <url> --program <id>
