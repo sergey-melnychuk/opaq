@@ -86,6 +86,7 @@ solana program deploy "$SBF_DEPLOY/opaq.so" --program-id "$PROG_KP"
 
 echo "==> run M10 zero-infra read path (+ withdraw via reconstructed path)"
 OPAQ_WITHDRAW_ZKEY="$WORK/setup_withdraw/circuit.zkey" \
+OPAQ_DEPOSIT_ZKEY="$WORK/setup_deposit/circuit.zkey" \
 OPAQ_VKMF="$VKMF" OPAQ_ROOT="$ROOT" \
 node "$ROOT/tests/m10_zero_infra.mjs" \
   "$PROG_KP" "$WORK/mint.json" "$WORK/recipient.json" \

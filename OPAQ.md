@@ -887,17 +887,21 @@ is as dangerous as a program bug. Owning a minimal, auditable ACIR→R1CS for ju
 `AssertZero` + `RANGE` (the only opcodes our circuits emit) is the cleaner
 long-term alternative to maintaining/auditing the general-purpose fork.
 
-**3. Finish M9 (prover CLI polish).** Remaining: (a) for *deposit* — symmetric
-prove + submit (it also needs depositor/vault SPL-account setup). **Withdraw is
-fully done, plus (b) and (c).** One `opaq withdraw --rpc <url> --program <id>
---submit --payer <kp> --zkey <zkey>` now reconstructs the path, proves, assembles
-the blob, and signs + broadcasts the tx itself — verified end-to-end by m10 on a
-validator (funds moved). (b): `opaq withdraw --rpc <url> --program <id>` harvests
-the leaf set live from chain (orchestrating the tested node read path) and
-reconstructs the Merkle path against any pool state, closing the fresh-program
-shortcut M11 used. (c): the same `--rpc` turns the A.8 recipient warning into a
-concrete fresh/not-fresh finding via a live signature-history lookup. Both
-verified by m10 on a validator (`--rpc` root == `--leaves` root; FRESH finding).
+**3. Finish M9 (prover CLI polish) — DONE.** The `opaq` CLI now drives the full
+lifecycle itself, both directions, verified end-to-end by m10 on a validator:
+- `opaq deposit --token <mint> --amount <n> --note <f> --rpc <url> --program <id>
+  --submit --payer <kp> --zkey <deposit.zkey>` generates a fresh note, proves the
+  binding proof, and signs + broadcasts the deposit (SPL → vault + commitment).
+- `opaq withdraw --note <f> --recipient <pk> --rpc <url> --program <id> --submit
+  --payer <kp> --zkey <withdraw.zkey>` harvests the leaf set live, reconstructs
+  the Merkle path against any pool state (b — closes the M11 fresh-pool shortcut),
+  auto-checks the recipient's on-chain history (c — A.8 fresh/not-fresh finding),
+  proves, and signs + broadcasts the withdraw.
+
+`--prove` (without `--submit`) stops at the ready-to-submit blob. Chain I/O lives
+in the tested node helpers (tests/{read_leaves,recipient_history,submit_*}.mjs)
+the CLI orchestrates; the on-chain instruction layout is a single shared lib fn
+(`groth16_verify::opaq_instruction`).
 
 **4. Phase 1.5 optimizations (non-blocking).** Sorted/hash-table nullifier set
 (B.2 — replaces the O(n) linear scan), and benchmark per-tx CU precisely

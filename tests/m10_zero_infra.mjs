@@ -186,7 +186,32 @@ async function main() {
   assert(await bal(vaultAta) === AMOUNT, "vault should retain note B's funds");
   console.log(`  OK  withdraw via RECONSTRUCTED path: recipient got ${AMOUNT}, note B untouched`);
 
-  [leavesFile, witnessFile, wdBin, payerFile].forEach((p) => fs.rmSync(p, { force: true }));
+  // --- M9(a): deposit full auto-submit. Fund the depositor, then ONE CLI call
+  // generates a fresh note, proves the binding proof, and signs + broadcasts the
+  // deposit (moving SPL into the vault + inserting the commitment). ---
+  const DZKEY = process.env.OPAQ_DEPOSIT_ZKEY;
+  await mintTo(conn, payer, mint, depositorAta, payer, AMOUNT);
+  const vaultBefore = await bal(vaultAta);
+  const depNote = path.join(os.tmpdir(), `opaq-depnote-${process.pid}.json`);
+  const depBin = path.join(os.tmpdir(), `opaq-dep-${process.pid}.bin`);
+  const depRun = spawnSync(opaqBin, [
+    "deposit",
+    "--token", mint.toBase58(),
+    "--amount", String(AMOUNT),
+    "--note", depNote,
+    "--rpc", rpc,
+    "--program", programId.toBase58(),
+    "--submit",
+    "--payer", payerFile,
+    "--zkey", DZKEY,
+    "--out", depBin,
+  ], { encoding: "utf8", env: { ...process.env, OPAQ_SUBMIT_DEPOSIT_SCRIPT: `${R}/tests/submit_deposit.mjs` } });
+  assert(depRun.status === 0, `--submit deposit failed: ${depRun.stderr}`);
+  assert(/deposit submitted ✓ tx \w+/.test(depRun.stdout), `no deposit tx signature in:\n${depRun.stdout}`);
+  assert(await bal(vaultAta) === vaultBefore + AMOUNT, "vault did not grow by the deposited amount");
+  console.log("  OK  CLI generated + proved + broadcast a deposit itself (M9a deposit auto-submit)");
+
+  [leavesFile, witnessFile, wdBin, payerFile, depNote, depBin].forEach((p) => fs.rmSync(p, { force: true }));
   console.log("\nM10 PASSED — zero-infra read path: Merkle path reconstructed from a clean" +
     " RPC-only client, then USED to withdraw on-chain (funds moved).");
 }

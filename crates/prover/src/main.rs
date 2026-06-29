@@ -66,23 +66,48 @@ fn deposit(f: &HashMap<String, String>) -> R {
     write_note(note_path, &note)?;
     println!("note written (encrypted) -> {note_path}");
 
-    // Optional: emit the deposit circuit's ABI inputs for this real note, so it
-    // can be proved directly (scripts/groth16-prove-note.sh deposit <zkey> <this>).
+    // The deposit circuit's ABI inputs for this real note (always built; written
+    // to --inputs-out and/or proved with --prove below).
+    let inputs = serde_json::json!({
+        "token_id": opaq_common::field_hex(&token_id),
+        "amount": opaq_common::field_hex(&be32(amount as u128)),
+        "new_commitment": opaq_common::field_hex(&commitment),
+        "owner_pubkey": opaq_common::field_hex(&owner_pubkey),
+        "blinding_factor": opaq_common::field_hex(&blinding),
+    })
+    .to_string();
     if let Some(p) = f.get("inputs-out") {
-        let inputs = serde_json::json!({
-            "token_id": opaq_common::field_hex(&token_id),
-            "amount": opaq_common::field_hex(&be32(amount as u128)),
-            "new_commitment": opaq_common::field_hex(&commitment),
-            "owner_pubkey": opaq_common::field_hex(&owner_pubkey),
-            "blinding_factor": opaq_common::field_hex(&blinding),
-        });
-        std::fs::write(p, inputs.to_string()).map_err(|e| format!("write {p}: {e}"))?;
+        std::fs::write(p, &inputs).map_err(|e| format!("write {p}: {e}"))?;
         println!("circuit inputs   -> {p}");
     }
     println!("\ndeposit public inputs (submit these with a proof):");
     println!("  token_id   {}", bs58::encode(mint).into_string());
     println!("  amount     {amount}");
     println!("  commitment 0x{}", hex::encode(commitment));
+
+    // M9(a): prove the binding proof + assemble the blob (--prove); with --submit,
+    // also sign + broadcast the deposit tx (moves SPL into the vault, inserts the
+    // commitment). Symmetric to withdraw, but the deposit blob carries the raw
+    // mint + commitment (no merkle/nullifier), so those sidecar fields are zero.
+    if f.contains_key("prove") || f.contains_key("submit") {
+        let out = f.get("out").map(String::as_str).unwrap_or("deposit.bin");
+        let z = "00".repeat(32);
+        let sidecar = format!(
+            "{{\"mint_hex\":\"{}\",\"amount\":{},\"commitment\":\"{}\",\
+             \"nullifier\":\"{z}\",\"merkle_root\":\"{z}\",\"recipient_hex\":\"{z}\"}}",
+            hex::encode(mint),
+            amount,
+            hex::encode(commitment),
+        );
+        prove_and_emit("deposit", &inputs, &sidecar, out, f)?;
+        println!("deposit instruction blob -> {out}");
+
+        if f.contains_key("submit") {
+            let sig = submit_deposit(out, &mint, f)?;
+            println!("deposit submitted ✓ tx {sig}");
+        }
+    }
+
     warn::amount(amount);
     Ok(())
 }
@@ -313,6 +338,26 @@ fn submit_withdraw(
             &script, rpc, program, blob, payer,
             &hex::encode(mint), &bs58::encode(recipient).into_string(),
         ])
+        .output()
+        .map_err(|e| format!("spawn node {script}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("submit failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Sign + broadcast a deposit tx via the node submit helper. Needs --rpc,
+/// --program, --payer <keypair.json>; the payer is the depositor (its token
+/// account must already hold `amount` of the mint). Override the script with
+/// $OPAQ_SUBMIT_DEPOSIT_SCRIPT (default: tests/submit_deposit.mjs).
+fn submit_deposit(blob: &str, mint: &[u8; 32], f: &HashMap<String, String>) -> Result<String, String> {
+    let rpc = f.get("rpc").ok_or("--submit requires --rpc <url>")?;
+    let program = f.get("program").ok_or("--submit requires --program <id>")?;
+    let payer = f.get("payer").ok_or("--submit requires --payer <keypair.json>")?;
+    let script = std::env::var("OPAQ_SUBMIT_DEPOSIT_SCRIPT")
+        .unwrap_or_else(|_| "tests/submit_deposit.mjs".to_string());
+    let out = std::process::Command::new("node")
+        .args([&script, rpc, program, blob, payer, &hex::encode(mint)])
         .output()
         .map_err(|e| format!("spawn node {script}: {e}"))?;
     if !out.status.success() {
