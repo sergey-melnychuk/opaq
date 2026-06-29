@@ -535,13 +535,28 @@ an attacker can't find a different `recipient`/`mint` hashing to the same field.
 This is the same byte-order/domain-separation surface the B.0 parity spike
 covers — extend that test to cover `to_field` on 32-byte inputs too.
 
-**B.4.3 `circuits/transfer/src/main.nr` — Phase 2, not Phase 1**
+**B.4.3 `circuits/transfer/src/main.nr` — Phase 2 (now written, P2.0)**
 
-Do not build this in Phase 1. Stub the directory, leave it empty.
-Generalizing to N-input/M-output join-split is meaningfully more complex
-(value conservation across multiple token_ids, multiple nullifiers, multiple
-new commitments) and should only be attempted after withdraw/deposit
-round-trip cleanly on devnet.
+Built after Phase 1 round-tripped on devnet. Fixed **2-in/2-out** join-split,
+fully private: `token_id` and every amount are private witnesses; the only public
+inputs are `merkle_root`, `nullifier[2]`, `out_commitment[2]`. So the anonymity
+set is every transfer, not identical-(token,amount) ones (closes A.12). Design:
+- All 4 notes reuse one private `token_id` (a transfer can't mint across tokens).
+- Value conservation `Σin == Σout`, every amount range-checked to 64 bits — the
+  range checks are load-bearing for soundness (field wraps mod p; an unchecked
+  amount near p forges value, B.4.1). Sums stay `< 2·2^64 < p`, so the equality
+  is exact.
+- `is_dummy` inputs (amount 0, skip Merkle membership) let a transfer spend < 2
+  real notes; their nullifier is still bound to a fresh-blinded commitment, so it
+  can't collide with or pre-empt a real note's nullifier (Poseidon preimage
+  resistance) and recording it on-chain is harmless.
+
+Compiles (33.6k ACIR opcodes, 0 Brillig — only `AssertZero` + `RANGE`, the
+soundly-lowered set per B.6). Remaining: host-parity witness gen + Groth16
+prove/verify (needs ceremony power ~17–18, ~2× withdraw), then the on-chain
+`transfer` instruction (tag 3: verify → root-recent → 2 nullifiers → 2 inserts,
+no vault), `vk_transfer`, an `opaq transfer` CLI, and a deposit→transfer→withdraw
+e2e. NOT yet proven.
 
 ### B.5 Solana Program Spec (Anchor)
 
@@ -935,7 +950,12 @@ the sorted/hash-table nullifier set (B.2, replacing the scan) is confirmed
 *non-blocking*: needed before mainnet scale, not before correctness. (Account
 size is the other ceiling: 10 MB ÷ 32 B ≈ 327k nullifiers.)
 
-**5. Phase 2 — private transfer + hidden amounts (A.6).** The big privacy win:
+**5. Phase 2 — private transfer + hidden amounts (A.6). STARTED (P2.0).** The
+circuit `circuits/transfer/src/main.nr` is written + compiling (2-in/2-out
+join-split, private `token_id` + amounts, value conservation; see B.4.3). Next:
+host-parity witness gen + Groth16 prove/verify (ceremony power ~17–18), the
+on-chain `transfer` instruction, `vk_transfer`, `opaq transfer`, and a
+deposit→transfer→withdraw e2e. The big privacy win:
 `transfer.nr` N-input/M-output join-split with per-`token_id` value
 conservation, which also closes the A.12 limitation (amounts/token are public in
 Phase 1, so the anonymity set is only identical-`(token, amount)` transfers).
