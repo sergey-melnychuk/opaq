@@ -55,6 +55,25 @@ pub const SPL_TOKEN_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     28, 180, 133, 237, 95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
 ]);
 
+/// Associated Token Account program id (`ATokenGP…`). Used to pin the vault to
+/// the ONE canonical ATA per (vault_authority, mint): without this, any token
+/// account owned by the vault PDA passes `check_vault`, so deposits/withdrawals
+/// could reference different vault accounts and desync the single-vault invariant
+/// the pool's accounting assumes.
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    140, 151, 37, 143, 78, 36, 137, 241, 187, 61, 16, 41, 20, 142, 13, 131,
+    11, 90, 19, 153, 218, 255, 16, 132, 4, 142, 123, 216, 219, 233, 248, 89,
+]);
+
+/// The canonical vault token account: the ATA of `vault_authority` for `mint`.
+fn canonical_vault_ata(vault_authority: &Pubkey, mint: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(
+        &[vault_authority.as_ref(), SPL_TOKEN_PROGRAM_ID.as_ref(), mint],
+        &ASSOCIATED_TOKEN_PROGRAM_ID,
+    )
+    .0
+}
+
 const DEPOSIT_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     nr_pubinputs: 3,
     vk_alpha_g1: vk_deposit::VK_ALPHA_G1,
@@ -411,6 +430,11 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progra
     // drain the real vault.
     let (vault_authority, _) = Pubkey::find_program_address(&[VAULT_SEED, &token_id], program_id);
     check_vault(vault_token, &token_id, &vault_authority)?;
+    // Pin the ONE canonical vault (the authority's ATA), so every deposit/withdraw
+    // for this mint hits the same account and the single-vault invariant holds.
+    if vault_token.key != &canonical_vault_ata(&vault_authority, &token_id) {
+        return Err(ProgramError::Custom(E_WRONG_VAULT));
+    }
     // depositor_token must be the same mint (defense-in-depth; the token program
     // also enforces mint equality on transfer).
     if depositor_token.data.borrow().get(0..32) != Some(&token_id[..]) {
@@ -491,6 +515,9 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progr
         return Err(ProgramError::InvalidSeeds);
     }
     check_vault(vault_token, &token_id, &vault_auth_pda)?;
+    if vault_token.key != &canonical_vault_ata(&vault_auth_pda, &token_id) {
+        return Err(ProgramError::Custom(E_WRONG_VAULT));
+    }
     // recipient_token must be owned by the proof-bound recipient — otherwise the
     // recipient public input is toothless and a submitter could redirect funds —
     // and be the same mint (defense-in-depth; the token program also enforces it).

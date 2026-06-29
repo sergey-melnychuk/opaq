@@ -892,8 +892,12 @@ long-term alternative to maintaining/auditing the general-purpose fork.
 > forged/no-op token program let a deposit insert a commitment WITHOUT funding
 > the vault (drain on withdraw). Now both instructions pin `SPL_TOKEN_PROGRAM_ID`
 > (+ mint-binding defense-in-depth), with an m8 negative test
-> ("forged token_program deposit rejected"). A full external audit is still
-> required — this was a self-review, not a substitute.
+> ("forged token_program deposit rejected"). A follow-up pass also pins the vault
+> to its canonical ATA (low-severity: a non-canonical token account owned by the
+> vault PDA could desync deposits/withdrawals from the single-vault invariant — no
+> theft, but bad accounting), with an m8 negative test ("non-canonical vault
+> deposit rejected"). A full external audit is still required — this was a
+> self-review, not a substitute.
 
 **3. Finish M9 (prover CLI polish) — DONE.** The `opaq` CLI now drives the full
 lifecycle itself, both directions, verified end-to-end by m10 on a validator:

@@ -8,7 +8,7 @@ import {
   TransactionInstruction, ComputeBudgetProgram, sendAndConfirmTransaction, LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import {
-  TOKEN_PROGRAM_ID, createMint, getOrCreateAssociatedTokenAccount, mintTo, getAccount,
+  TOKEN_PROGRAM_ID, createMint, getOrCreateAssociatedTokenAccount, mintTo, getAccount, createAccount,
 } from "@solana/spl-token";
 
 const kp = (p) => Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(p, "utf8"))));
@@ -103,6 +103,10 @@ async function main() {
   // then drain it on withdraw. Pass the System program in the token_program slot.
   await expectFail(depositIx(depositData, depositorAta, vaultAta, SystemProgram.programId),
     "forged token_program deposit");
+  // Audit fix: a non-canonical vault (owned by the vault PDA but not its ATA) must
+  // be rejected, so deposits/withdrawals can't desync across multiple vault accounts.
+  const rogueVault = await createAccount(conn, payer, mint, vaultAuthority, Keypair.generate());
+  await expectFail(depositIx(depositData, depositorAta, rogueVault), "non-canonical vault deposit");
   // Note A, then note B (distinct commitment, same fixed VK) — B moves the root
   // so the later withdraw of A exercises stale-root tolerance (Test 4).
   await send(depositIx(depositData));
