@@ -24,6 +24,7 @@ use solana_program::{
 };
 
 mod tree_consts;
+mod vk_burn;
 mod vk_deposit;
 mod vk_transfer;
 mod vk_withdraw;
@@ -100,6 +101,15 @@ const TRANSFER_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     vk_gamme_g2: vk_transfer::VK_GAMME_G2,
     vk_delta_g2: vk_transfer::VK_DELTA_G2,
     vk_ic: &vk_transfer::VK_IC,
+};
+
+const BURN_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
+    nr_pubinputs: 6, // merkle_root, nullifier, token_id, amount, dest_chain, dest_address
+    vk_alpha_g1: vk_burn::VK_ALPHA_G1,
+    vk_beta_g2: vk_burn::VK_BETA_G2,
+    vk_gamme_g2: vk_burn::VK_GAMME_G2,
+    vk_delta_g2: vk_burn::VK_DELTA_G2,
+    vk_ic: &vk_burn::VK_IC,
 };
 
 /// Original Poseidon hash of two field elements (== the circuit's hash_2 and
@@ -253,6 +263,7 @@ pub fn process_instruction(
         0 => initialize_pool(program_id, accounts),
         1 => deposit(program_id, accounts, args),
         3 => transfer(program_id, accounts, args),
+        4 => burn(program_id, accounts, args),
         2 => withdraw(program_id, accounts, args),
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -635,4 +646,77 @@ fn transfer(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progr
 
     msg!("opaq: transfer ok, leaves={},{}", leaf0, leaf1);
     Ok(())
+}
+
+/// Burn (Phase 3): like withdraw, but releases NO SPL — it burns the note (records
+/// the nullifier on Solana, value stays locked in the vault) and binds an EVM mint
+/// destination (dest_chain, dest_address). An EVM mint contract verifies this same
+/// proof and mints there, checking the nullifier against its OWN set (A.9 — the
+/// chains don't share state). The burn params are logged for the relayer.
+/// Accounts: [payer (signer,w), commitment_tree, nullifier_set (w), system_program]
+/// Args (424): proof_a(64) proof_b(128) proof_c(64) merkle_root(32) nullifier(32)
+///             token_id(32) amount(8 LE) dest_chain(32) dest_address(32)
+#[inline(never)]
+fn burn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
+    if args.len() != 64 + 128 + 64 + 32 + 32 + 32 + 8 + 32 + 32 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let proof_a: [u8; 64] = args[0..64].try_into().unwrap();
+    let proof_b: [u8; 128] = args[64..192].try_into().unwrap();
+    let proof_c: [u8; 64] = args[192..256].try_into().unwrap();
+    let merkle_root: [u8; 32] = args[256..288].try_into().unwrap();
+    let nullifier: [u8; 32] = args[288..320].try_into().unwrap();
+    let token_id: [u8; 32] = args[320..352].try_into().unwrap();
+    let amount = u64::from_le_bytes(args[352..360].try_into().unwrap());
+    let dest_chain: [u8; 32] = args[360..392].try_into().unwrap();
+    let dest_address: [u8; 32] = args[392..424].try_into().unwrap();
+
+    // Public inputs in circuit order (burn.nr). dest_chain/dest_address are bound,
+    // so a relayer can't redirect the EVM mint.
+    let public = [
+        merkle_root,
+        nullifier,
+        to_field(&token_id),
+        be32(amount),
+        dest_chain,
+        dest_address,
+    ];
+    let mut verifier = Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public, &BURN_VK)
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+    verifier
+        .verify()
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+
+    let iter = &mut accounts.iter();
+    let payer = next_account_info(iter)?;
+    let tree_ai = next_account_info(iter)?;
+    let nullifier_ai = next_account_info(iter)?;
+    let system = next_account_info(iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
+    let (nf_pda, _) = Pubkey::find_program_address(&[NULLIFIER_SEED], program_id);
+    if tree_ai.key != &tree_pda || nullifier_ai.key != &nf_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    if !tree_is_known_root(&tree_ai.data.borrow(), &merkle_root) {
+        return Err(ProgramError::Custom(E_UNKNOWN_ROOT));
+    }
+    // Double-burn check, then record the nullifier. No SPL release and no tree
+    // insert: the value is now claimable on the destination chain via the proof.
+    if nullifier_contains(&nullifier_ai.data.borrow(), &nullifier) {
+        return Err(ProgramError::Custom(E_ALREADY_SPENT));
+    }
+    nullifier_append(payer, nullifier_ai, system, nullifier)?;
+
+    msg!("opaq: burn ok, amount={}, dest_chain={}", amount, chain_lo(&dest_chain));
+    Ok(())
+}
+
+/// Low 32 bits of a 32-byte field — the EVM chain id for typical ids (cheap log).
+fn chain_lo(b: &[u8; 32]) -> u32 {
+    u32::from_be_bytes(b[28..32].try_into().unwrap())
 }

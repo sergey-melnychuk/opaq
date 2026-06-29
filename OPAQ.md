@@ -970,14 +970,14 @@ Phase 1, so the anonymity set is only identical-`(token, amount)` transfers).
 Until Phase 2, treat the privacy as "unlinkable only within an identical-amount
 crowd."
 
-**6. Phase 3 — cross-chain burn/mint (A.6). STARTED (P3.0).** `circuits/burn/src/
-main.nr` is written + compiling: `withdraw` with `recipient` swapped for the bound
-EVM destination `(dest_chain, dest_address)` and no SPL release — it burns the note
-(records the nullifier on Solana, value stays locked in the vault) so an EVM mint
-contract can mint the equivalent asset. 16.4k ACIR opcodes, 0 Brillig (fits ptau
-power 16). Remaining: (a) the Solana `burn` instruction (tag 4: verify → root-recent
-→ record nullifier, NO vault release — mirrors withdraw minus the SPL transfer) +
-`vk_burn`; (b) the **EVM side** — a Groth16 Solidity verifier (snarkjs
+**6. Phase 3 — cross-chain burn/mint (A.6). SOLANA SIDE DONE (P3.0–P3.1).**
+`circuits/burn/src/main.nr` (`withdraw` with `recipient` swapped for the bound EVM
+destination `(dest_chain, dest_address)` and no SPL release; 16.4k ACIR, 0 Brillig,
+power 16) AND the on-chain `burn` instruction (tag 4: verify → root-recent → record
+nullifier, NO tree insert, NO vault release) with `vk_burn` are live — verified on a
+validator by **m14**: deposit→burn records the nullifier, leaves the tree and vault
+unchanged (value locked on Solana for the EVM mint), and rejects a replay.
+Remaining (the **EVM side**, a new domain): (b) a Groth16 Solidity verifier (snarkjs
 `zkey export solidityverifier`, NOT `bb` — `bb` emits UltraHonk; we're Groth16) +
 a mint contract with its own nullifier set (a whole new EVM/Foundry toolchain);
 (c) the permissionless relay (the user submits the burn proof to EVM themselves).

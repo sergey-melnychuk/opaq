@@ -30,3 +30,4 @@ ceremony/.cache/
 ceremony/work/
 *.ptau
 *.zkey
+circuits/burn_values.json

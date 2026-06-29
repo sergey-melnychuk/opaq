@@ -54,7 +54,8 @@ fn main() {
         commitment: hex32(sidecar["commitment"].as_str().unwrap()),
         nullifier: hex32(sidecar["nullifier"].as_str().unwrap()),
         merkle_root: hex32(sidecar["merkle_root"].as_str().unwrap()),
-        recipient: hex32(sidecar["recipient_hex"].as_str().unwrap()),
+        recipient: hex32(sidecar["recipient_hex"].as_str().unwrap()), // burn: dest_address
+        dest_chain: sidecar["dest_chain"].as_str().map(hex32).unwrap_or_default(),
     };
 
     let data = opaq_instruction(circuit, &p, &fields).unwrap();

@@ -128,6 +128,51 @@ fn main() {
         ],
     );
 
+    // --- burn/Prover.toml (Phase 3): like withdraw, EVM destination, no SPL ---
+    let dest_chain = be32(1); // Ethereum mainnet chain id
+    let mut dest_address = [0u8; 32]; // a dummy 20-byte EVM address as a BE field
+    dest_address[12..32].copy_from_slice(&[0x11; 20]);
+    let burn = format!(
+        "merkle_root = \"{}\"\nnullifier = \"{}\"\ntoken_id = \"{}\"\namount = \"{}\"\n\
+         dest_chain = \"{}\"\ndest_address = \"{}\"\nspend_key = \"{}\"\nblinding_factor = \"{}\"\n\
+         merkle_path = [{}]\nmerkle_path_indices = [{}]\n",
+        field_hex(&merkle_root), field_hex(&nullifier), field_hex(&token_id), field_hex(&amount),
+        field_hex(&dest_chain), field_hex(&dest_address), field_hex(&spend_key), field_hex(&blinding),
+        path_list, idx_list,
+    );
+    write(&circuits_dir, "burn", &burn);
+    write_json(
+        &circuits_dir,
+        "burn",
+        &[
+            ("merkle_root", field_hex(&merkle_root)),
+            ("nullifier", field_hex(&nullifier)),
+            ("token_id", field_hex(&token_id)),
+            ("amount", field_hex(&amount)),
+            ("dest_chain", field_hex(&dest_chain)),
+            ("dest_address", field_hex(&dest_address)),
+            ("spend_key", field_hex(&spend_key)),
+            ("blinding_factor", field_hex(&blinding)),
+        ],
+        &[
+            ("merkle_path", siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect()),
+            ("merkle_path_indices", right.iter().map(|b| b.to_string()).collect()),
+        ],
+    );
+    // burn sidecar for emit_opaq_instruction (mint/amount + the bound EVM dest).
+    let burn_sidecar = format!(
+        "{{\"mint_hex\":\"{}\",\"amount\":{},\"commitment\":\"{}\",\"nullifier\":\"{}\",\
+         \"merkle_root\":\"{}\",\"dest_chain\":\"{}\",\"recipient_hex\":\"{}\"}}\n",
+        hex::encode(mint_bytes),
+        amount_u64,
+        hex::encode(commitment),
+        hex::encode(nullifier),
+        hex::encode(merkle_root),
+        hex::encode(dest_chain),
+        hex::encode(dest_address),
+    );
+    fs::write(circuits_dir.join("burn_values.json"), burn_sidecar).unwrap();
+
     // --- transfer/Prover.toml (Phase 2, P2.1): 2-in/2-out join-split ---
     // input[0]: the real note above (leaf 0, reusing the withdraw merkle setup).
     // input[1]: a dummy (amount 0). Split A into out[0]=B (to recipient) + out[1]=
