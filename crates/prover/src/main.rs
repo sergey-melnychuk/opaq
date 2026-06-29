@@ -32,7 +32,8 @@ fn main() {
     let r = match args.get(1).map(String::as_str) {
         Some("deposit") => deposit(&flags(&args[2..])),
         Some("withdraw") => withdraw(&flags(&args[2..])),
-        _ => Err("usage: opaq <deposit|withdraw> ...".into()),
+        Some("transfer") => transfer(&flags(&args[2..])),
+        _ => Err("usage: opaq <deposit|withdraw|transfer> ...".into()),
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
@@ -230,6 +231,141 @@ fn withdraw(f: &HashMap<String, String>) -> R {
     warn::recipient(&recipient, history);
     warn::amount(amount);
     Ok(())
+}
+
+/// Transfer (Phase 2): spend one note privately — send `--amount` to a recipient
+/// (their owner_pubkey, hex) and keep the change in a fresh self note — via a
+/// 2-in/2-out join-split (the 2nd input is a dummy). Hides the amount and token.
+/// Needs --rpc/--program (to harvest + reconstruct the input's Merkle path) or
+/// --leaves; --prove emits the blob, --submit also broadcasts it.
+fn transfer(f: &HashMap<String, String>) -> R {
+    let note = read_note(req(f, "note")?)?;
+    let mint = hex32(note["mint"].as_str().ok_or("note missing mint")?)?;
+    let in_amount = note["amount"].as_u64().ok_or("note missing amount")?;
+    let in_spend_key = hex32(note["spend_key"].as_str().ok_or("note missing spend_key")?)?;
+    let in_blinding = hex32(note["blinding"].as_str().ok_or("note missing blinding")?)?;
+    let in_commitment = hex32(note["commitment"].as_str().ok_or("note missing commitment")?)?;
+    let token_id = to_field_be(&mint);
+
+    let recipient_owner = hex32(req(f, "to")?)?; // recipient's owner_pubkey = hash_1(their spend_key)
+    let send_amount: u64 = req(f, "amount")?.parse().map_err(|_| "amount must be u64")?;
+    if send_amount > in_amount {
+        return Err(format!("send amount {send_amount} exceeds note amount {in_amount}"));
+    }
+    let change = in_amount - send_amount;
+    let in_nullifier = poseidon_be(&[in_commitment, in_spend_key]); // hash_2
+
+    // Dummy 2nd input (amount 0, skips Merkle membership in-circuit).
+    let dummy_sk = random_scalar();
+    let dummy_bl = random_scalar();
+    let dummy_owner = poseidon_be(&[dummy_sk]);
+    let dummy_commit = poseidon_be(&[token_id, be32(0), dummy_owner, dummy_bl]);
+    let dummy_nf = poseidon_be(&[dummy_commit, dummy_sk]);
+
+    // out[0] -> recipient; out[1] -> change in a FRESH self note (fresh secrets).
+    let out0_bl = random_scalar();
+    let out0_amt = be32(send_amount as u128);
+    let out0_commit = poseidon_be(&[token_id, out0_amt, recipient_owner, out0_bl]);
+    let change_sk = random_scalar();
+    let change_bl = random_scalar();
+    let change_owner = poseidon_be(&[change_sk]);
+    let out1_amt = be32(change as u128);
+    let out1_commit = poseidon_be(&[token_id, out1_amt, change_owner, change_bl]);
+
+    // Reconstruct the input note's Merkle path (zero-infra read path, like withdraw).
+    let leaves = if let (Some(rpc), Some(program)) = (f.get("rpc"), f.get("program")) {
+        println!("  harvesting leaves over RPC ({rpc}) …");
+        harvest_leaves(rpc, program)?
+    } else if let Some(p) = f.get("leaves") {
+        load_leaves(p)?
+    } else {
+        return Err("transfer needs --rpc <url> --program <id> (or --leaves <file>)".to_string());
+    };
+    let leaf_index = leaves
+        .iter()
+        .position(|c| *c == in_commitment)
+        .ok_or("input note commitment not found in on-chain leaves (wrong pool/passphrase?)")?
+        as u64;
+    let zeros = tree::zero_hashes(&poseidon2);
+    let (siblings, right, merkle_root) =
+        tree::reconstruct_path(&poseidon2, &zeros, &leaves, leaf_index);
+
+    println!(
+        "transfer: spend {in_amount} (leaf {leaf_index}) -> send {send_amount} to recipient, {change} change"
+    );
+    println!("  merkle_root 0x{}", hex::encode(merkle_root));
+
+    // Build the transfer witness (input[0] real, input[1] dummy).
+    let fh = |x: &[u8; 32]| field_hex(x);
+    let path_j = siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect::<Vec<_>>().join(",");
+    let idx_j = right.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",");
+    let zeros_j = vec!["\"0x00\"".to_string(); 24].join(",");
+    let false_j = vec!["false".to_string(); 24].join(",");
+    let inputs = format!(
+        "{{\"merkle_root\":\"{}\",\"nullifiers\":[\"{}\",\"{}\"],\"out_commitments\":[\"{}\",\"{}\"],\
+         \"token_id\":\"{}\",\"in_amount\":[\"{}\",\"{}\"],\"in_spend_key\":[\"{}\",\"{}\"],\
+         \"in_blinding\":[\"{}\",\"{}\"],\"in_is_dummy\":[false,true],\
+         \"in_merkle_path\":[[{}],[{}]],\"in_merkle_path_indices\":[[{}],[{}]],\
+         \"out_amount\":[\"{}\",\"{}\"],\"out_owner_pubkey\":[\"{}\",\"{}\"],\"out_blinding\":[\"{}\",\"{}\"]}}",
+        fh(&merkle_root), fh(&in_nullifier), fh(&dummy_nf), fh(&out0_commit), fh(&out1_commit),
+        fh(&token_id), fh(&be32(in_amount as u128)), fh(&be32(0)),
+        fh(&in_spend_key), fh(&dummy_sk), fh(&in_blinding), fh(&dummy_bl),
+        path_j, zeros_j, idx_j, false_j,
+        fh(&out0_amt), fh(&out1_amt), fh(&recipient_owner), fh(&change_owner), fh(&out0_bl), fh(&change_bl),
+    );
+
+    // Persist the output notes: change to self (encrypted), recipient's as plaintext
+    // to hand over (they hold the spend_key behind recipient_owner).
+    if let Some(p) = f.get("change-note") {
+        let cn = serde_json::json!({
+            "mint": hex::encode(mint), "amount": change,
+            "spend_key": hex::encode(change_sk), "blinding": hex::encode(change_bl),
+            "owner_pubkey": hex::encode(change_owner), "commitment": hex::encode(out1_commit),
+            "leaf_index": Value::Null,
+        });
+        write_note(p, &cn)?;
+        println!("change note (encrypted) -> {p}");
+    }
+    if let Some(p) = f.get("out-note") {
+        let on = serde_json::json!({
+            "mint": hex::encode(mint), "amount": send_amount,
+            "owner_pubkey": hex::encode(recipient_owner), "blinding": hex::encode(out0_bl),
+            "commitment": hex::encode(out0_commit), "leaf_index": Value::Null,
+        });
+        std::fs::write(p, on.to_string()).map_err(|e| format!("write {p}: {e}"))?;
+        println!("recipient note (plaintext, hand to recipient) -> {p}");
+    }
+
+    if f.contains_key("prove") || f.contains_key("submit") {
+        let out = f.get("out").map(String::as_str).unwrap_or("transfer.bin");
+        prove_and_emit("transfer", &inputs, "{}", out, f)?; // sidecar unused for transfer
+        println!("transfer instruction blob -> {out}");
+        if f.contains_key("submit") {
+            let sig = submit_transfer(out, f)?;
+            println!("transfer submitted ✓ tx {sig}");
+        }
+    }
+
+    warn::amount(send_amount);
+    Ok(())
+}
+
+/// Sign + broadcast a transfer tx via the node submit helper (accounts: payer,
+/// tree, nullifiers, system — no vault). Override via $OPAQ_SUBMIT_TRANSFER_SCRIPT.
+fn submit_transfer(blob: &str, f: &HashMap<String, String>) -> Result<String, String> {
+    let rpc = f.get("rpc").ok_or("--submit requires --rpc <url>")?;
+    let program = f.get("program").ok_or("--submit requires --program <id>")?;
+    let payer = f.get("payer").ok_or("--submit requires --payer <keypair.json>")?;
+    let script = std::env::var("OPAQ_SUBMIT_TRANSFER_SCRIPT")
+        .unwrap_or_else(|_| "tests/submit_transfer.mjs".to_string());
+    let out = std::process::Command::new("node")
+        .args([&script, rpc, program, blob, payer])
+        .output()
+        .map_err(|e| format!("spawn node {script}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("submit failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// 2-input Poseidon over big-endian field elements — the tree's hash, proven

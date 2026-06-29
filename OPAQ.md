@@ -950,15 +950,20 @@ the sorted/hash-table nullifier set (B.2, replacing the scan) is confirmed
 *non-blocking*: needed before mainnet scale, not before correctness. (Account
 size is the other ceiling: 10 MB ÷ 32 B ≈ 327k nullifiers.)
 
-**5. Phase 2 — private transfer + hidden amounts (A.6). P2.0–P2.3 DONE.** The
-circuit `circuits/transfer/src/main.nr` proves/verifies end-to-end (host-computed
-witness via `gen_witness`, `nargo execute`, Groth16 at ptau power 17), AND the
+**5. Phase 2 — private transfer + hidden amounts (A.6). DONE (P2.0–P2.4).** A
+fully-private 2-in/2-out join-split, end-to-end: the circuit
+`circuits/transfer/src/main.nr` proves/verifies (Groth16 at ptau power 17); the
 on-chain `transfer` instruction (tag 3: verify → root-recent → record 2
-nullifiers → insert 2 commitments, no vault) is live with `vk_transfer` and
-verified on a validator by **m12**: deposit→transfer lands 2 output commitments,
-records the nullifiers, moves no tokens, and a replay (nullifier reuse) is
-rejected. Only **P2.4** remains — an `opaq transfer` CLI (select inputs, mint
-outputs, prove, submit). The big privacy win:
+nullifiers → insert 2 commitments, no vault) is live with `vk_transfer`; and the
+`opaq transfer` CLI drives it (harvest + reconstruct the input path, mint the
+output notes, prove, submit). Verified on a validator by **m12** (instruction +
+replay rejection) and **m13** (full CLI loop: `opaq deposit` → `opaq transfer` →
+`opaq withdraw` the change). The read path (`tests/read_path.mjs`) now harvests
+transfer output commitments too, so transfer-created notes are withdrawable. This
+**closes A.12**: amounts and token are hidden in a transfer, so the anonymity set
+is every transfer, not identical-`(token, amount)` ones. (Deposit/withdraw still
+expose amount/token at the SPL boundary — privacy comes from depositing, then
+transferring before withdrawing to a fresh note.) Original framing kept below:
 `transfer.nr` N-input/M-output join-split with per-`token_id` value
 conservation, which also closes the A.12 limitation (amounts/token are public in
 Phase 1, so the anonymity set is only identical-`(token, amount)` transfers).

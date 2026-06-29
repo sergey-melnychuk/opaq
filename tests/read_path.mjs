@@ -64,9 +64,11 @@ async function allSignatures(conn, address) {
   return out.reverse(); // chronological
 }
 
-// Pull the (leaf_index -> commitment) pairs out of one deposit transaction.
-// A deposit instruction is `tag=1` (329 bytes) whose final 32 bytes are the
-// commitment; the program logs `opaq: deposit ok, leaf_index=N` per insert.
+// Pull the (leaf_index -> commitment) pairs out of one transaction. Two kinds of
+// opaq instruction insert leaves: a deposit (`tag=1`, 329 bytes, final 32 = the
+// commitment, logs `deposit ok, leaf_index=N`) and a transfer (`tag=3`, 417 bytes,
+// final 64 = the 2 output commitments, logs `transfer ok, leaves=N,M`). Both must
+// be harvested or notes created by a transfer (e.g. change) can't be withdrawn.
 function depositsFromTx(tx, programId) {
   if (!tx || tx.meta?.err) return [];
   const msg = tx.transaction.message;
@@ -79,15 +81,21 @@ function depositsFromTx(tx, programId) {
     const owner = keys[ix.programIdIndex];
     if ((owner.toBase58 ? owner.toBase58() : owner.pubkey?.toBase58()) !== pid) continue;
     const raw = typeof ix.data === "string" ? Buffer.from(bs58.decode(ix.data)) : Buffer.from(ix.data);
-    if (raw.length !== 329 || raw[0] !== 1) continue;
-    commitments.push(hex(raw.subarray(raw.length - 32)));
+    if (raw.length === 329 && raw[0] === 1) {
+      commitments.push(hex(raw.subarray(raw.length - 32)));
+    } else if (raw.length === 417 && raw[0] === 3) {
+      commitments.push(hex(raw.subarray(raw.length - 64, raw.length - 32))); // out_commitment0
+      commitments.push(hex(raw.subarray(raw.length - 32))); // out_commitment1
+    }
   }
   if (commitments.length === 0) return [];
 
   const indices = [];
   for (const line of tx.meta?.logMessages ?? []) {
-    const m = line.match(/opaq: deposit ok, leaf_index=(\d+)/);
-    if (m) indices.push(Number(m[1]));
+    const d = line.match(/opaq: deposit ok, leaf_index=(\d+)/);
+    if (d) { indices.push(Number(d[1])); continue; }
+    const t = line.match(/opaq: transfer ok, leaves=(\d+),(\d+)/);
+    if (t) indices.push(Number(t[1]), Number(t[2]));
   }
   // Pair in order; fall back to positional if the program ever stops logging.
   return commitments.map((commitment, i) => ({
