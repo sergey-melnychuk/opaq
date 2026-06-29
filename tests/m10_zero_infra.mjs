@@ -121,6 +121,20 @@ async function main() {
     "full-tree reconstruction should match the current on-chain root");
   console.log("  OK  reconstructed root matches a known on-chain root (current root)");
 
+  // M9: the same withdraw, but harvesting leaves LIVE over RPC (--rpc/--program)
+  // instead of a pre-harvested --leaves file. Must reconstruct the identical root
+  // — proving the CLI works against any live pool with no external harness.
+  const outRpc = execFileSync(opaqBin, [
+    "withdraw",
+    "--note", noteAPath,
+    "--recipient", recipient.publicKey.toBase58(),
+    "--rpc", rpc,
+    "--program", programId.toBase58(),
+  ], { encoding: "utf8", env: { ...process.env, OPAQ_READ_SCRIPT: `${process.env.OPAQ_ROOT}/tests/read_leaves.mjs` } });
+  const rootRpc = outRpc.match(/merkle_root 0x([0-9a-f]{64})/)?.[1];
+  assert(rootRpc === root, `--rpc root ${rootRpc} != --leaves root ${root}`);
+  console.log("  OK  --rpc harvest reconstructs the identical root (no leaves file)");
+
   // The emitted witness is a complete, well-formed withdraw input.
   const w = JSON.parse(fs.readFileSync(witnessFile, "utf8"));
   assert(w.merkle_path.length === 24 && w.merkle_path_indices.length === 24,

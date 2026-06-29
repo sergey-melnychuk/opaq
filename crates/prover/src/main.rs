@@ -104,11 +104,20 @@ fn withdraw(f: &HashMap<String, String>) -> R {
     println!("  amount     {amount}");
     println!("  recipient  {}", bs58::encode(recipient).into_string());
 
-    // Zero-infra read path (M10 / Test 7): given the ordered commitment list
-    // harvested from chain over plain RPC (see tests/read_path.mjs), rebuild this
-    // note's Merkle authentication path locally — no indexer, no special access.
-    if let Some(leaves_path) = f.get("leaves") {
-        let leaves = load_leaves(leaves_path)?;
+    // Zero-infra read path (M10 / Test 7): obtain the ordered commitment list and
+    // rebuild this note's Merkle authentication path locally — no indexer, no
+    // special access. Leaves come either from a pre-harvested `--leaves` file or,
+    // with `--rpc <url> --program <id>`, harvested live from chain here (M9).
+    let leaves = if let Some(leaves_path) = f.get("leaves") {
+        Some(load_leaves(leaves_path)?)
+    } else if let (Some(rpc), Some(program)) = (f.get("rpc"), f.get("program")) {
+        println!("  harvesting leaves over RPC ({rpc}) …");
+        Some(harvest_leaves(rpc, program)?)
+    } else {
+        None
+    };
+
+    if let Some(leaves) = leaves {
         let leaf_index = leaves
             .iter()
             .position(|c| *c == commitment)
@@ -148,8 +157,9 @@ fn withdraw(f: &HashMap<String, String>) -> R {
         }
     } else {
         println!(
-            "  merkle_root + path: pass --leaves <file> (the RPC-harvested commitment \
-             list) to reconstruct locally — zero-infra read path, M10"
+            "  merkle_root + path: pass --rpc <url> --program <id> to harvest leaves \
+             live from chain, or --leaves <file> for a pre-harvested list — zero-infra \
+             read path, M9/M10"
         );
     }
 
@@ -164,20 +174,44 @@ fn poseidon2(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     poseidon_be(&[*a, *b])
 }
 
-/// Load the ordered commitment (leaf) list produced by the RPC read path:
-/// a JSON array of 32-byte hex strings, index `i` == on-chain `leaf_index` `i`.
-fn load_leaves(path: &str) -> Result<Vec<[u8; 32]>, String> {
-    let v: Value = serde_json::from_slice(
-        &std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?,
-    )
-    .map_err(|_| "leaves file is not valid JSON")?;
-    let arr = v.as_array().ok_or("leaves file must be a JSON array of hex commitments")?;
+/// Parse the ordered commitment (leaf) list: a JSON array of 32-byte hex
+/// strings, index `i` == on-chain `leaf_index` `i`. Shared by the `--leaves`
+/// file path and the `--rpc` harvest path.
+fn parse_leaves(bytes: &[u8]) -> Result<Vec<[u8; 32]>, String> {
+    let v: Value = serde_json::from_slice(bytes).map_err(|_| "leaves are not valid JSON")?;
+    let arr = v.as_array().ok_or("leaves must be a JSON array of hex commitments")?;
     let mut out = Vec::with_capacity(arr.len());
     for (i, e) in arr.iter().enumerate() {
         let s = e.as_str().ok_or_else(|| format!("leaf {i} is not a string"))?;
         out.push(hex32(s)?);
     }
     Ok(out)
+}
+
+/// Load the ordered leaf list from a pre-harvested file.
+fn load_leaves(path: &str) -> Result<Vec<[u8; 32]>, String> {
+    parse_leaves(&std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?)
+}
+
+/// Harvest the ordered leaf list directly from chain over plain RPC, so a
+/// withdraw works against ANY live pool state (closing the M11 fresh-pool
+/// shortcut). RPC logic lives in the tested node read path (tests/read_path.mjs
+/// via read_leaves.mjs); this orchestrates it so there's one source of truth.
+/// Override the script with $OPAQ_READ_SCRIPT (default: tests/read_leaves.mjs).
+fn harvest_leaves(rpc: &str, program: &str) -> Result<Vec<[u8; 32]>, String> {
+    let script = std::env::var("OPAQ_READ_SCRIPT")
+        .unwrap_or_else(|_| "tests/read_leaves.mjs".to_string());
+    let out = std::process::Command::new("node")
+        .args([&script, rpc, program])
+        .output()
+        .map_err(|e| format!("spawn node {script}: {e} (is node installed / cwd repo root?)"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "read path failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    parse_leaves(&out.stdout)
 }
 
 // --- helpers ---
