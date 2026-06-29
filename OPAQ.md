@@ -896,8 +896,20 @@ long-term alternative to maintaining/auditing the general-purpose fork.
 > to its canonical ATA (low-severity: a non-canonical token account owned by the
 > vault PDA could desync deposits/withdrawals from the single-vault invariant — no
 > theft, but bad accounting), with an m8 negative test ("non-canonical vault
-> deposit rejected"). A full external audit is still required — this was a
-> self-review, not a substitute.
+> deposit rejected").
+>
+> Surface (b), the vendored Noir→Groth16 lowering, also got a focused soundness
+> pass over the opcodes our circuits emit (`AssertZero`, `RANGE`, with Brillig
+> hints) — **no under-constraint found**: `AssertZero` lowers each `mul_term` to a
+> real `lhs·rhs=tmp` constraint then binds `1·(Σ terms)=0`; `RANGE` boolean-checks
+> every bit (`w·(w−1)=0`) AND binds `Σ 2ⁱ·bitᵢ = input` (so it genuinely proves
+> `input < 2^n`; ≥field-width ranges are tautological with no overflow since
+> `n ≤ 253 ⇒ 2ⁿ < r`); wire 0 is reserved as the ONE signal (witness `w`→wire
+> `w+1`), so those constraints aren't vacuous; opcode dispatch is exhaustive
+> (nothing silently dropped) and the dangerous curve/MSM/dynamic-memory opcodes we
+> don't use are stubbed fail-closed. Empirically corroborated by m8's forged-amount
+> deposits/withdraws being rejected on-chain. This was a focused self-review of the
+> soundness-critical paths, **not** a full external audit of the whole crate.
 
 **3. Finish M9 (prover CLI polish) — DONE.** The `opaq` CLI now drives the full
 lifecycle itself, both directions, verified end-to-end by m10 on a validator:
