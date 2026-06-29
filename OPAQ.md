@@ -970,7 +970,20 @@ Phase 1, so the anonymity set is only identical-`(token, amount)` transfers).
 Until Phase 2, treat the privacy as "unlinkable only within an identical-amount
 crowd."
 
-**6. Phase 3 — cross-chain burn/mint (A.6).** `burn.nr`, the EVM Solidity
-verifier (turnkey via `bb`), the permissionless relay pattern, and the
-two-chains-don't-share-state trust writeup (A.9). This is where the
-BN254-everywhere bet pays off.
+**6. Phase 3 — cross-chain burn/mint (A.6). STARTED (P3.0).** `circuits/burn/src/
+main.nr` is written + compiling: `withdraw` with `recipient` swapped for the bound
+EVM destination `(dest_chain, dest_address)` and no SPL release — it burns the note
+(records the nullifier on Solana, value stays locked in the vault) so an EVM mint
+contract can mint the equivalent asset. 16.4k ACIR opcodes, 0 Brillig (fits ptau
+power 16). Remaining: (a) the Solana `burn` instruction (tag 4: verify → root-recent
+→ record nullifier, NO vault release — mirrors withdraw minus the SPL transfer) +
+`vk_burn`; (b) the **EVM side** — a Groth16 Solidity verifier (snarkjs
+`zkey export solidityverifier`, NOT `bb` — `bb` emits UltraHonk; we're Groth16) +
+a mint contract with its own nullifier set (a whole new EVM/Foundry toolchain);
+(c) the permissionless relay (the user submits the burn proof to EVM themselves).
+**Trust caveat (A.9):** the EVM mint verifies the ZK proof but cannot check that
+`merkle_root` is a real Solana tree root without a Solana light client — so the
+cross-chain step is **not trustless by default** and needs an explicit root-source
+design (oracle/light-client) before it can be trusted. The Solana-side burn is
+trustless; the bridge is the open trust question. This is where the
+BN254-everywhere bet pays off (one curve, one proof system, both chains).
