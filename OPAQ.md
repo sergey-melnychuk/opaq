@@ -693,6 +693,15 @@ audited `groth16-solana` crate, no pairing math hand-rolled.
 > Phase 1.5/production ceremony is mandatory before deployment**. The infinity
 > `IC` points are an artifact of the trivial setup, not a circuit bug — a proper
 > ceremony yields non-degenerate `IC` that bind every public input.
+>
+> **Ceremony tooling now exists** (`ceremony/`, `scripts/ceremony-*.sh`): it
+> reuses the Perpetual Powers of Tau (Hermez power-16) for the universal phase-1
+> and runs a per-circuit phase-2 (multi-contribution + drand beacon + verify) for
+> `deposit`/`withdraw`, re-embedding the VKs via `emit_artifacts --real`. The
+> `--smoke` profile is verified end-to-end (produces verifying proofs), but a
+> trustworthy run still requires **independent contributors + a pinned beacon** —
+> the social step the scripts can't supply. See `ceremony/README.md`. The embedded
+> VKs remain the insecure test ones until that real run happens.
 
 [jamesbachini/Noir-Groth16]: https://github.com/jamesbachini/Noir-Groth16
 
@@ -856,15 +865,18 @@ done; M9 partial). But it is a **working demo, not a deployable pool**. The item
 below are the path from here, ordered by what gates real use. (1)–(2) are hard
 blockers; nothing should hold real funds until both are done.
 
-**1. Secure proving ceremony — HARD BLOCKER.** Today the zkeys come from a
-trivial powers-of-tau with no contributions (B.6 SECURITY CAVEAT), so the
-verifying key is **forgeable** — anyone could mint a valid proof and drain the
-pool. Run a real ceremony: a phase-1 powers-of-tau with multiple independent
-contributions, then a per-circuit phase-2 contribution, for both `deposit` and
-`withdraw`. The M8 setup/prove split (`scripts/groth16-setup.sh` once →
-`groth16-prove-note.sh` per note) is exactly the shape this needs — swap the
-local `powersoftau new` + single `zkey contribute` for the real ceremony output,
-then re-embed the resulting VKs (`vk_deposit.rs` / `vk_withdraw.rs`).
+**1. Secure proving ceremony — HARD BLOCKER (tooling done; live run pending).**
+Today the zkeys come from a trivial powers-of-tau with no contributions (B.6
+SECURITY CAVEAT), so the verifying key is **forgeable** — anyone could mint a
+valid proof and drain the pool. The ceremony **pipeline now exists** (`ceremony/`,
+`scripts/ceremony-*.sh`): phase-1 is *reused* from the Perpetual Powers of Tau
+(Hermez power-16 — universal, so no need to generate our own), and phase-2 is run
+per-circuit (multi-contribution + drand beacon + `zkey verify`) for `deposit` and
+`withdraw`, re-embedding VKs via `emit_artifacts --real`. The `--smoke` profile is
+verified end-to-end. What remains is **operational, not code**: a real run with
+≥1 genuinely independent contributor per circuit (toxic waste destroyed) and a
+drand round pinned in advance, then commit the resulting VKs + `transcript.md`.
+Until that run, the embedded VKs stay the insecure test ones.
 
 **2. Audit — HARD BLOCKER.** Two surfaces: (a) the native program
 (`programs/opaq`) — proof-input binding, PDA/vault checks, nullifier set,
