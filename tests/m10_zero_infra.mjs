@@ -153,48 +153,40 @@ async function main() {
   assert(w.merkle_root === `0x${root}`, "witness root must match the printed root");
   console.log("  OK  emitted a complete depth-24 withdraw witness");
 
-  // --- close the loop: M9(a) prove-only — the CLI reconstructs (via --rpc),
-  // proves the withdraw, and emits the ready-to-submit blob ITSELF (no manual
-  // prove+emit). Submitting that blob on-chain below is the verification. ---
+  // --- close the loop: M9(a) full auto-submit — ONE CLI call reconstructs (via
+  // --rpc), proves, emits the blob, AND signs + broadcasts the withdraw tx
+  // itself (--submit, payer from a keypair file). No manual prove/emit/send. ---
   const { OPAQ_ROOT: R, OPAQ_WITHDRAW_ZKEY: WZKEY } = process.env;
   const wdBin = path.join(os.tmpdir(), `opaq-wd-${process.pid}.bin`);
-  const proveRun = spawnSync(opaqBin, [
+  const payerFile = path.join(os.tmpdir(), `opaq-payer-${process.pid}.json`);
+  fs.writeFileSync(payerFile, JSON.stringify(Array.from(payer.secretKey)));
+  const recipientAta = (await getOrCreateAssociatedTokenAccount(conn, payer, mint, recipient.publicKey)).address;
+
+  const submitRun = spawnSync(opaqBin, [
     "withdraw",
     "--note", noteAPath,
     "--recipient", recipient.publicKey.toBase58(),
     "--rpc", rpc,
     "--program", programId.toBase58(),
-    "--prove",
+    "--submit",
+    "--payer", payerFile,
     "--zkey", WZKEY,
     "--out", wdBin,
   ], { encoding: "utf8", env: {
     ...process.env,
     OPAQ_READ_SCRIPT: `${R}/tests/read_leaves.mjs`,
     OPAQ_RECIPIENT_SCRIPT: `${R}/tests/recipient_history.mjs`,
+    OPAQ_SUBMIT_SCRIPT: `${R}/tests/submit_withdraw.mjs`,
   } });
-  assert(proveRun.status === 0, `--prove withdraw failed: ${proveRun.stderr}`);
-  assert(fs.existsSync(wdBin), "--prove did not emit an instruction blob");
-  console.log("  OK  CLI proved the withdraw + emitted the instruction blob (M9a)");
+  assert(submitRun.status === 0, `--submit withdraw failed: ${submitRun.stderr}`);
+  assert(/withdraw submitted ✓ tx \w+/.test(submitRun.stdout), `no tx signature in:\n${submitRun.stdout}`);
+  console.log("  OK  CLI proved + signed + broadcast the withdraw itself (M9a auto-submit)");
 
-  const recipientAta = (await getOrCreateAssociatedTokenAccount(conn, payer, mint, recipient.publicKey)).address;
-  await send(new TransactionInstruction({
-    programId, data: fs.readFileSync(wdBin),
-    keys: [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
-      { pubkey: vaultAuthority, isSigner: false, isWritable: false },
-      { pubkey: vaultAta, isSigner: false, isWritable: true },
-      { pubkey: recipientAta, isSigner: false, isWritable: true },
-      { pubkey: tree, isSigner: false, isWritable: false },
-      { pubkey: nullifiers, isSigner: false, isWritable: true },
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-  }));
   assert(await bal(recipientAta) === AMOUNT, "recipient did not receive funds via reconstructed-path withdraw");
   assert(await bal(vaultAta) === AMOUNT, "vault should retain note B's funds");
   console.log(`  OK  withdraw via RECONSTRUCTED path: recipient got ${AMOUNT}, note B untouched`);
 
-  [leavesFile, witnessFile, wdBin].forEach((p) => fs.rmSync(p, { force: true }));
+  [leavesFile, witnessFile, wdBin, payerFile].forEach((p) => fs.rmSync(p, { force: true }));
   console.log("\nM10 PASSED — zero-infra read path: Merkle path reconstructed from a clean" +
     " RPC-only client, then USED to withdraw on-chain (funds moved).");
 }

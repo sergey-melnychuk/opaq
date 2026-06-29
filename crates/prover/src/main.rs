@@ -158,10 +158,11 @@ fn withdraw(f: &HashMap<String, String>) -> R {
             println!("withdraw circuit inputs -> {p}");
         }
 
-        // M9(a) prove-only: generate the Groth16 proof and assemble the ready-to-
-        // submit instruction blob, orchestrating the same tested toolchain the test
-        // harness uses (groth16-prove-note.sh + emit_opaq_instruction).
-        if f.contains_key("prove") {
+        // M9(a): generate the Groth16 proof and assemble the ready-to-submit
+        // instruction blob (--prove), orchestrating the same tested toolchain the
+        // test harness uses (groth16-prove-note.sh + emit_opaq_instruction). With
+        // --submit, also sign + broadcast the tx via the node submit helper.
+        if f.contains_key("prove") || f.contains_key("submit") {
             let out = f.get("out").map(String::as_str).unwrap_or("withdraw.bin");
             let sidecar = format!(
                 "{{\"merkle_root\":\"{}\",\"nullifier\":\"{}\",\"mint_hex\":\"{}\",\
@@ -174,7 +175,12 @@ fn withdraw(f: &HashMap<String, String>) -> R {
                 "00".repeat(32), // unused by withdraw; emit_opaq_instruction still parses it
             );
             prove_and_emit("withdraw", &inputs, &sidecar, out, f)?;
-            println!("withdraw instruction blob -> {out} (submit with `opaq` or a node tx)");
+            println!("withdraw instruction blob -> {out}");
+
+            if f.contains_key("submit") {
+                let sig = submit_withdraw(out, &mint, &recipient, f)?;
+                println!("withdraw submitted ✓ tx {sig}");
+            }
         }
     } else {
         println!(
@@ -287,6 +293,34 @@ fn prove_and_emit(
     ])
 }
 
+/// Sign + broadcast a withdraw tx via the node submit helper (chain I/O stays in
+/// the node path, where the account layout lives). Needs --rpc, --program, and
+/// --payer <keypair.json>. Override the script with $OPAQ_SUBMIT_SCRIPT
+/// (default: tests/submit_withdraw.mjs). Returns the confirmed tx signature.
+fn submit_withdraw(
+    blob: &str,
+    mint: &[u8; 32],
+    recipient: &[u8; 32],
+    f: &HashMap<String, String>,
+) -> Result<String, String> {
+    let rpc = f.get("rpc").ok_or("--submit requires --rpc <url>")?;
+    let program = f.get("program").ok_or("--submit requires --program <id>")?;
+    let payer = f.get("payer").ok_or("--submit requires --payer <keypair.json>")?;
+    let script = std::env::var("OPAQ_SUBMIT_SCRIPT")
+        .unwrap_or_else(|_| "tests/submit_withdraw.mjs".to_string());
+    let out = std::process::Command::new("node")
+        .args([
+            &script, rpc, program, blob, payer,
+            &hex::encode(mint), &bs58::encode(recipient).into_string(),
+        ])
+        .output()
+        .map_err(|e| format!("spawn node {script}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("submit failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Spawn a command inheriting stdio, erroring on non-zero exit.
 fn run(cmd: &str, args: &[&str]) -> R {
     let st = std::process::Command::new(cmd)
@@ -328,13 +362,20 @@ fn recipient_history(rpc: &str, recipient_b58: &str) -> Result<warn::RecipientHi
 fn flags(args: &[String]) -> HashMap<String, String> {
     let mut m = HashMap::new();
     let mut i = 0;
-    while i + 1 < args.len() {
+    while i < args.len() {
         if let Some(k) = args[i].strip_prefix("--") {
-            m.insert(k.to_string(), args[i + 1].clone());
-            i += 2;
-        } else {
-            i += 1;
+            // A following non-flag token is the value; otherwise it's a boolean
+            // flag (e.g. --prove / --submit), recorded with an empty value.
+            let val = match args.get(i + 1) {
+                Some(v) if !v.starts_with("--") => {
+                    i += 1;
+                    v.clone()
+                }
+                _ => String::new(),
+            };
+            m.insert(k.to_string(), val);
         }
+        i += 1;
     }
     m
 }
