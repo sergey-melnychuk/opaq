@@ -977,13 +977,27 @@ power 16) AND the on-chain `burn` instruction (tag 4: verify → root-recent →
 nullifier, NO tree insert, NO vault release) with `vk_burn` are live — verified on a
 validator by **m14**: deposit→burn records the nullifier, leaves the tree and vault
 unchanged (value locked on Solana for the EVM mint), and rejects a replay.
-Remaining (the **EVM side**, a new domain): (b) a Groth16 Solidity verifier (snarkjs
-`zkey export solidityverifier`, NOT `bb` — `bb` emits UltraHonk; we're Groth16) +
-a mint contract with its own nullifier set (a whole new EVM/Foundry toolchain);
-(c) the permissionless relay (the user submits the burn proof to EVM themselves).
-**Trust caveat (A.9):** the EVM mint verifies the ZK proof but cannot check that
-`merkle_root` is a real Solana tree root without a Solana light client — so the
-cross-chain step is **not trustless by default** and needs an explicit root-source
-design (oracle/light-client) before it can be trusted. The Solana-side burn is
-trustless; the bridge is the open trust question. This is where the
-BN254-everywhere bet pays off (one curve, one proof system, both chains).
+**EVM side DONE too** (`evm/`): a Groth16 Solidity verifier (snarkjs
+`zkey export solidityverifier` — NOT `bb`, which emits UltraHonk; we're Groth16)
++ `OpaqMint.sol`, verified on anvil by **m15** (`forge test`): the full
+`pendingMint`→`mint` lifecycle, the double-mint guard, the un-pending guard, the
+re-add-after-mint guard, and `onlyOperator` all pass against a **real burn proof**.
+A finding fell out of it: the insecure zero-contribution ceremony's degenerate VK
+`IC` points are tolerated by snarkjs/groth16-solana but **rejected by the EVM
+`ecMul` precompile** — so the EVM verifier requires a non-degenerate (properly
+contributed) VK; m15 uses the real PPoT ptau (which also corroborates the §B.6
+ceremony tooling end-to-end). Remaining: the permissionless relay (the user
+submits the burn proof to EVM themselves) and the reverse direction.
+
+**Trust model — see the A.9 ladder.** The EVM mint does NOT need to validate the
+Solana root: the Solana `burn` instruction already enforced a valid root before
+recording the nullifier, so mirroring Solana's **burned-nullifier set** (not
+roots) is sufficient. `OpaqMint` takes a semi-trusted `operator` that mirrors
+finalized burns as `pendingMint` entries (the ONLY trust; everything else is
+ZK-bound — the proof binds the nullifier to (token, amount, dest), so the operator
+attests a boolean and never sees a secret). `pendingMint` is the outstanding-burn
+queue + gas refund on consume; a permanent `minted` flag is the real double-mint
+guard. `operator` is **ICP-ready**: point it at an ICP canister's threshold-ECDSA
+address and the operator becomes a consensus-run, on-chain, auto-signing oracle —
+see A.9 for the full trust ladder up to an in-canister Solana light client. This
+is where the BN254-everywhere bet pays off (one curve, one proof system).

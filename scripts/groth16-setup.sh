@@ -20,9 +20,20 @@ mkdir -p "$OUT"
 # interop gives circuit.r1cs (circuit-only) + a sample witness.wtns
 "$NOIR_CLI" interop "$ART" "$CDIR/inputs.json" --out "$OUT/interop" >/dev/null
 
-snarkjs powersoftau new bn128 "$POWER" "$OUT/pot0.ptau" >/dev/null
-snarkjs powersoftau prepare phase2 "$OUT/pot0.ptau" "$OUT/pot.ptau" >/dev/null
-snarkjs groth16 setup "$OUT/interop/circuit.r1cs" "$OUT/pot.ptau" "$OUT/zkey0.zkey" >/dev/null
+# Phase-1 ptau. A zero-contribution local ceremony is fast but yields DEGENERATE
+# VK IC points (some at infinity); snarkjs + groth16-solana tolerate that, but the
+# EVM ecMul precompile rejects off-curve points — so the Solidity verifier
+# (Phase 3) needs a non-degenerate VK. Set OPAQ_PTAU=<pre-prepared phase2 ptau>
+# (e.g. the real PPoT via ceremony-fetch-ptau.sh) to use a non-degenerate,
+# already-prepared phase-1 — also far faster than a real local prepare-phase2.
+if [ -n "${OPAQ_PTAU:-}" ]; then
+  PTAU_PREPARED="$OPAQ_PTAU"
+else
+  snarkjs powersoftau new bn128 "$POWER" "$OUT/pot0.ptau" >/dev/null
+  snarkjs powersoftau prepare phase2 "$OUT/pot0.ptau" "$OUT/pot.ptau" >/dev/null
+  PTAU_PREPARED="$OUT/pot.ptau"
+fi
+snarkjs groth16 setup "$OUT/interop/circuit.r1cs" "$PTAU_PREPARED" "$OUT/zkey0.zkey" >/dev/null
 snarkjs zkey contribute "$OUT/zkey0.zkey" "$OUT/circuit.zkey" \
   --name=opaq -e="opaq deterministic entropy" >/dev/null
 snarkjs zkey export verificationkey "$OUT/circuit.zkey" "$OUT/verification_key.json" >/dev/null
