@@ -908,11 +908,45 @@ If the implementing agent finds itself building any of the above mid-Phase-1, th
 
 ### B.11 Next Steps (consolidated roadmap)
 
-Phase 1 is **verified end-to-end** — deposit/withdraw round-trip with the full
-negative-test envelope on a local validator and on devnet (B.9: M0–M8, M10, M11
-done; M9 partial). But it is a **working demo, not a deployable pool**. The items
-below are the path from here, ordered by what gates real use. (1)–(2) are hard
-blockers; nothing should hold real funds until both are done.
+**Status: the full protocol is built and end-to-end-verified across all three
+phases** — Phase 1 (deposit/withdraw, hardened by 2 audit fixes + CU-benchmarked),
+Phase 2 (private transfer with hidden amount *and* token; `opaq
+deposit→transfer→withdraw` CLI loop, m12/m13), and Phase 3 (Solana `burn` + EVM
+`OpaqMint` cross-chain mint, m14/m15). The ceremony tooling (#1) and a focused
+audit self-review (#2) are done. It is nonetheless a **verified research
+implementation, not a deployable pool**: every embedded VK is still the insecure
+test VK, the bridge's relay/operator isn't built, and transfers need out-of-band
+note delivery. The numbered items (1)–(6) below are the per-area status records;
+the prioritized pipeline of what to do *next* is right here:
+
+**The pipeline from here (in priority order):**
+
+1. **[BLOCKER] Run the real ceremony** for all four circuits (deposit, withdraw,
+   transfer, burn). Tooling is ready (`scripts/ceremony-*.sh`); this is the
+   operational step — independent contributors + a pinned drand beacon — then
+   re-embed VKs + commit the transcript. Gates everything; also *required for
+   correctness* on the EVM side (the trivial VK's degenerate points are rejected
+   by the EVM `ecMul` precompile — see #6).
+2. **[BLOCKER] External audit** of `programs/opaq`, the vendored
+   `tools/noir-groth16` backend (ideally replaced by a minimal owned ACIR→R1CS for
+   just `AssertZero`+`RANGE`), and `evm/OpaqMint.sol` + the generated verifier. The
+   self-review (#2) found+fixed 2 real bugs but is not a substitute.
+3. **Make the bridge drivable**: an `opaq burn` CLI verb (the instruction exists,
+   the verb doesn't) + a permissionless relay that carries a burn proof to the EVM
+   mint, then the **ICP operator canister** (A.9 ladder rung 2 — watch Solana,
+   `addPending`, threshold-sign both chains). Reverse direction (EVM burn → Solana
+   mint) after.
+4. **Received-note discovery** (wallet UX): today transfer outputs are handed over
+   out-of-band. Add encrypted memos (sender posts a ciphertext to the recipient's
+   viewing key, recipient scans + trial-decrypts) or HD-derived notes, plus an
+   `opaq list-unspent` (one nullifier-set read + local checks) and a note store.
+5. **Phase 1.5 perf** (non-blocking): swap the O(n) nullifier scan for a
+   sorted/hash-table set before mainnet scale (measured headroom ~41k nullifiers,
+   ~31 CU each).
+6. **Deploy/ops**: mainnet program deploy + monitoring, ICP canister hosting, the
+   A.9 rung-3 in-canister Solana light client to drop the operator's RPC trust.
+
+The per-area records below (kept for detail; statuses are current):
 
 **1. Secure proving ceremony — HARD BLOCKER (tooling done; live run pending).**
 Today the zkeys come from a trivial powers-of-tau with no contributions (B.6
