@@ -211,11 +211,45 @@ protocol layer.
 | Deposit | No | SPL transfer is a normal on-chain transaction |
 | Withdraw / Transfer | No | Proof verified on-chain, nullifier enforced on-chain |
 | Tree root consistency | No | Enforced by the program itself |
-| Cross-chain burn/mint (Phase 3) | Partial, until relay pattern is fully specified | Relayer is permissionless but the two chains don't share consensus — needs explicit design, not assumed trustless by default |
+| Cross-chain burn/mint (Phase 3) | Yes, on the bridge oracle — see the ladder below | The two chains don't share consensus, so something must attest Solana burns to the EVM mint |
 
-Phase 1 and 2 are fully trustless by construction. Phase 3 needs its own
-explicit trust-model writeup once relayer mechanics are designed — don't
-assume it inherits Phase 1's trustlessness for free.
+Phase 1 and 2 are fully trustless by construction. Phase 3's Solana side is too
+(the `burn` instruction verifies the proof + a valid root + the nullifier on
+Solana). The trust is entirely in **how the EVM mint learns a Solana burn
+happened** — and it does NOT need the Solana *root*: because `burn` already
+enforces a valid on-chain root before recording a nullifier, mirroring Solana's
+**burned-nullifier set** is sufficient (`OpaqMint.pendingMint`). Everything else
+stays ZK-bound: the proof binds the nullifier to `(token, amount, dest_address)`,
+so the attestor relays a boolean per burn and never sees a secret. The residual
+trust is purely *"the attestor won't fabricate a burn that didn't happen."*
+
+**The trust ladder** (each rung strictly reduces trust; `OpaqMint` is built at
+rung 1 and the contract is unchanged across 1→3 — only *who* `operator` is moves):
+
+1. **Single operator.** `operator` is one key that calls `addPending`. Trust: one
+   party honestly mirrors finalized Solana burns. Simple, deployable, what we ship.
+2. **ICP canister as operator.** Point `operator` at an ICP canister's threshold-
+   ECDSA-derived Ethereum address. The canister watches Solana via HTTPS outcalls
+   to N public RPC nodes (results agreed by the subnet) and signs+posts `addPending`
+   itself (chain-key tECDSA) — a consensus-run, on-chain, auto-signing oracle, no
+   relayer server ("near-zero-infra"). Threshold Ed25519 signs Solana txs too, so
+   the reverse direction (EVM burn → Solana mint) is symmetric. Trust shifts from
+   one party to *the ICP subnet + the honesty of the queried RPC nodes* (the outcall
+   proves "the subnet agreed on what the RPCs returned," not that the RPCs were
+   truthful about Solana consensus).
+3. **ICP canister + in-canister Solana light client.** The canister verifies Solana
+   *consensus* (validator-set signatures / bank hash for the block containing the
+   burn) instead of trusting RPC, then bridges via its threshold signature. The
+   heavy consensus-verification runs as cheap canister compute, so neither L1 runs
+   the other's light client on-chain. Trust reduces to *the ICP subnet* (validity
+   now comes from verified Solana consensus). This is ICP's "chain fusion" thesis.
+4. **Full on-chain light clients both sides.** Trust only the two L1s — the ideal,
+   but verifying Solana consensus on the EVM is prohibitively expensive, which is
+   exactly the cost rung 3 sidesteps.
+
+So Phase 3 is **not** trustless-by-default, but it has a concrete, monotonic path
+from one operator to near-trustless, and the EVM contract is already built to walk
+it (`operator` = a canister address is a deployment config, not a rewrite).
 
 ### A.10 Technical Notes
 
