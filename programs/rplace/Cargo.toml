@@ -1,0 +1,15 @@
+# Standalone workspace (detached so cargo build-sbf resolves only this graph).
+# Build: cargo build-sbf --tools-version v1.54
+[workspace]
+
+[package]
+name = "rplace"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "3"

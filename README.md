@@ -96,3 +96,11 @@ multi-token), the prover CLI, the zero-infra read path, and a devnet demo.
 **Remaining before real use:** a secure multi-party ceremony, an audit of the
 Noir→Groth16 backend, Phase 2 (private join-split transfers, hidden amounts),
 and Phase 3 (cross-chain burn/mint).
+
+## Sidenote: on-chain toys
+
+Two throwaway native-Solana programs sit under `programs/` as playful demos of
+the same bare-metal, no-Anchor style the pool uses — unrelated to Opaq, just for
+fun: `tamagotchi` (an on-chain pet whose stats decay against the `Clock` slot)
+and `rplace` (a shared 32×32 pixel canvas). `scripts/fun-demo.sh` builds both,
+starts a validator, and renders them in the terminal.
