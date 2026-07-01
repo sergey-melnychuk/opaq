@@ -33,7 +33,8 @@ fn main() {
         Some("deposit") => deposit(&flags(&args[2..])),
         Some("withdraw") => withdraw(&flags(&args[2..])),
         Some("transfer") => transfer(&flags(&args[2..])),
-        _ => Err("usage: opaq <deposit|withdraw|transfer> ...".into()),
+        Some("burn") => burn(&flags(&args[2..])),
+        _ => Err("usage: opaq <deposit|withdraw|transfer|burn> ...".into()),
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
@@ -229,6 +230,128 @@ fn withdraw(f: &HashMap<String, String>) -> R {
         None => None,
     };
     warn::recipient(&recipient, history);
+    warn::amount(amount);
+    Ok(())
+}
+
+/// Parse a 20-byte `0x…` EVM address into the 32-byte field the burn circuit
+/// binds: the address right-aligned in bytes [12..32], matching gen_witness.
+fn evm_address(s: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s.trim_start_matches("0x")).map_err(|_| "dest-address must be hex")?;
+    if bytes.len() != 20 {
+        return Err("dest-address must be a 20-byte EVM address (40 hex chars)".into());
+    }
+    let mut out = [0u8; 32];
+    out[12..32].copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Burn (Phase 3): spend one note cross-chain — record its nullifier on Solana
+/// (value stays locked in the vault, no SPL released) and bind an EVM mint
+/// destination `(--dest-chain, --dest-address)` as public inputs, so an EVM
+/// `OpaqMint` can verify the same proof and mint to `dest_address`. Like
+/// `withdraw`, but an EVM destination instead of a Solana recipient. Needs
+/// --rpc/--program (to harvest + reconstruct the note's Merkle path) or --leaves;
+/// --prove emits the ready-to-submit instruction blob.
+fn burn(f: &HashMap<String, String>) -> R {
+    let note = read_note(req(f, "note")?)?;
+    let dest_chain: u64 = req(f, "dest-chain")?
+        .parse()
+        .map_err(|_| "dest-chain must be a u64 EVM chain id")?;
+    let dest_addr = evm_address(req(f, "dest-address")?)?;
+
+    let commitment = hex32(note["commitment"].as_str().ok_or("note missing commitment")?)?;
+    let spend_key = hex32(note["spend_key"].as_str().ok_or("note missing spend_key")?)?;
+    let mint = hex32(note["mint"].as_str().ok_or("note missing mint")?)?;
+    let amount = note["amount"].as_u64().ok_or("note missing amount")?;
+
+    let nullifier = poseidon_be(&[commitment, spend_key]); // hash_2
+    let dest_chain_field = be32(dest_chain as u128);
+
+    println!("burn public inputs (submit these with a proof):");
+    println!("  nullifier    0x{}", hex::encode(nullifier));
+    println!("  token_id     {}", bs58::encode(mint).into_string());
+    println!("  amount       {amount}");
+    println!("  dest_chain   {dest_chain}");
+    println!("  dest_address 0x{}", hex::encode(&dest_addr[12..32]));
+
+    // Zero-infra read path (M10): obtain the ordered commitment list and rebuild
+    // this note's Merkle path locally — from --leaves or live via --rpc/--program.
+    let leaves = if let Some(leaves_path) = f.get("leaves") {
+        Some(load_leaves(leaves_path)?)
+    } else if let (Some(rpc), Some(program)) = (f.get("rpc"), f.get("program")) {
+        println!("  harvesting leaves over RPC ({rpc}) …");
+        Some(harvest_leaves(rpc, program)?)
+    } else {
+        None
+    };
+
+    if let Some(leaves) = leaves {
+        let leaf_index = leaves
+            .iter()
+            .position(|c| *c == commitment)
+            .ok_or("note commitment not found in on-chain leaves (wrong pool/passphrase?)")?
+            as u64;
+
+        let blinding = hex32(note["blinding"].as_str().ok_or("note missing blinding")?)?;
+        let zeros = tree::zero_hashes(&poseidon2);
+        let (siblings, right, merkle_root) =
+            tree::reconstruct_path(&poseidon2, &zeros, &leaves, leaf_index);
+
+        let token_id = to_field_be(&mint);
+        println!("  leaf_index {leaf_index} (located in on-chain leaf set)");
+        println!("  merkle_root 0x{}", hex::encode(merkle_root));
+
+        let path: Vec<String> = siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect();
+        let idx: Vec<String> = right.iter().map(|b| b.to_string()).collect();
+        let inputs = format!(
+            "{{\"merkle_root\":\"{}\",\"nullifier\":\"{}\",\"token_id\":\"{}\",\
+             \"amount\":\"{}\",\"dest_chain\":\"{}\",\"dest_address\":\"{}\",\
+             \"spend_key\":\"{}\",\"blinding_factor\":\"{}\",\"merkle_path\":[{}],\
+             \"merkle_path_indices\":[{}]}}",
+            field_hex(&merkle_root),
+            field_hex(&nullifier),
+            field_hex(&token_id),
+            field_hex(&be32(amount as u128)),
+            field_hex(&dest_chain_field),
+            field_hex(&dest_addr),
+            field_hex(&spend_key),
+            field_hex(&blinding),
+            path.join(","),
+            idx.join(","),
+        );
+        if let Some(p) = f.get("inputs-out") {
+            std::fs::write(p, &inputs).map_err(|e| format!("write {p}: {e}"))?;
+            println!("burn circuit inputs -> {p}");
+        }
+
+        // Emit the ready-to-submit burn instruction blob (--prove). The blob is
+        // what the on-chain tag-4 burn instruction consumes; broadcasting it
+        // (submit_burn + tests/submit_burn.mjs) is the next increment.
+        if f.contains_key("prove") {
+            let out = f.get("out").map(String::as_str).unwrap_or("burn.bin");
+            let sidecar = format!(
+                "{{\"mint_hex\":\"{}\",\"amount\":{},\"commitment\":\"{}\",\
+                 \"nullifier\":\"{}\",\"merkle_root\":\"{}\",\"dest_chain\":\"{}\",\
+                 \"recipient_hex\":\"{}\"}}",
+                hex::encode(mint),
+                amount,
+                hex::encode(commitment),
+                hex::encode(nullifier),
+                hex::encode(merkle_root),
+                hex::encode(dest_chain_field),
+                hex::encode(dest_addr),
+            );
+            prove_and_emit("burn", &inputs, &sidecar, out, f)?;
+            println!("burn instruction blob -> {out}");
+        }
+    } else {
+        println!(
+            "  merkle_root + path: pass --rpc <url> --program <id> to harvest leaves \
+             live from chain, or --leaves <file> for a pre-harvested list (zero-infra read path)"
+        );
+    }
+
     warn::amount(amount);
     Ok(())
 }
