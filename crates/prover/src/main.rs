@@ -325,10 +325,10 @@ fn burn(f: &HashMap<String, String>) -> R {
             println!("burn circuit inputs -> {p}");
         }
 
-        // Emit the ready-to-submit burn instruction blob (--prove). The blob is
-        // what the on-chain tag-4 burn instruction consumes; broadcasting it
-        // (submit_burn + tests/submit_burn.mjs) is the next increment.
-        if f.contains_key("prove") {
+        // Emit the ready-to-submit burn instruction blob (--prove); with --submit,
+        // also sign + broadcast the tag-4 burn tx (records the nullifier; no SPL
+        // released, no tree insert — value is now claimable on the EVM side).
+        if f.contains_key("prove") || f.contains_key("submit") {
             let out = f.get("out").map(String::as_str).unwrap_or("burn.bin");
             let sidecar = format!(
                 "{{\"mint_hex\":\"{}\",\"amount\":{},\"commitment\":\"{}\",\
@@ -344,6 +344,11 @@ fn burn(f: &HashMap<String, String>) -> R {
             );
             prove_and_emit("burn", &inputs, &sidecar, out, f)?;
             println!("burn instruction blob -> {out}");
+
+            if f.contains_key("submit") {
+                let sig = submit_burn(out, f)?;
+                println!("burn submitted ✓ tx {sig}");
+            }
         }
     } else {
         println!(
@@ -481,6 +486,25 @@ fn submit_transfer(blob: &str, f: &HashMap<String, String>) -> Result<String, St
     let payer = f.get("payer").ok_or("--submit requires --payer <keypair.json>")?;
     let script = std::env::var("OPAQ_SUBMIT_TRANSFER_SCRIPT")
         .unwrap_or_else(|_| "tests/submit_transfer.mjs".to_string());
+    let out = std::process::Command::new("node")
+        .args([&script, rpc, program, blob, payer])
+        .output()
+        .map_err(|e| format!("spawn node {script}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("submit failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Sign + broadcast a burn tx via the node submit helper (accounts: payer, tree
+/// [read-only], nullifiers, system — no vault; a burn moves no SPL). Override via
+/// $OPAQ_SUBMIT_BURN_SCRIPT (default: tests/submit_burn.mjs).
+fn submit_burn(blob: &str, f: &HashMap<String, String>) -> Result<String, String> {
+    let rpc = f.get("rpc").ok_or("--submit requires --rpc <url>")?;
+    let program = f.get("program").ok_or("--submit requires --program <id>")?;
+    let payer = f.get("payer").ok_or("--submit requires --payer <keypair.json>")?;
+    let script = std::env::var("OPAQ_SUBMIT_BURN_SCRIPT")
+        .unwrap_or_else(|_| "tests/submit_burn.mjs".to_string());
     let out = std::process::Command::new("node")
         .args([&script, rpc, program, blob, payer])
         .output()
