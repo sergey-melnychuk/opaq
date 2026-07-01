@@ -137,10 +137,14 @@ Goal: burn a note on Solana, mint the equivalent asset on an EVM chain, proof-ga
 
 **Key invariant:** the same nullifier must be checked on both chains independently — burning on Solana and minting on EVM are two separate proof verifications, not one shared state, since the chains don't share a state root.
 
-**Phase 4 — Lending / Advanced Features (exploratory)**
-- Shielded collateral: prove note ownership without revealing it, to back a loan
-- Private interest accrual — likely needs a different commitment structure (time-locked notes)
-- Not scoped in detail yet — revisit after Phase 1-3 are real and working
+**Phase 4 — Symmetric Cross-Chain Shielded Bridge + Advanced Features**
+- **Reverse direction as a symmetric bridge (fully spec'd — see B.12):** make the
+  EVM side a full shielded pool (Tornado-style Poseidon Merkle tree + nullifier
+  set) so cross-chain movement is a private note-burn on the source → note-mint
+  (re-shield) on the destination — one Groth16 proof verified on the destination,
+  identical machinery both ways. Supersedes the `OpaqMint` balance ledger.
+- Lending / advanced (exploratory, not scoped): shielded collateral (prove note
+  ownership to back a loan); private interest accrual (time-locked notes).
 
 ### A.7 Critical Integration Risk: Poseidon Variant Mismatch
 
@@ -1073,3 +1077,130 @@ guard. `operator` is **ICP-ready**: point it at an ICP canister's threshold-ECDS
 address and the operator becomes a consensus-run, on-chain, auto-signing oracle —
 see A.9 for the full trust ladder up to an in-canister Solana light client. This
 is where the BN254-everywhere bet pays off (one curve, one proof system).
+
+### B.12 Phase 4 Spec — Symmetric Cross-Chain Shielded Bridge (reverse direction)
+
+**Goal & decision.** Complete the bridge in *both* directions by making the EVM
+side a **full shielded pool** (like the Solana pool), so cross-chain movement is a
+private **note-burn on the source → note-mint (re-shield) on the destination**,
+gated by one Groth16 proof the destination verifies. This is the symmetric design
+(design "B" + re-shield): the *same* machinery runs Solana→EVM and EVM→Solana. It
+**supersedes `OpaqMint`'s `balanceOf` ledger** (§6) with an EVM commitment tree,
+and generalizes `burn.nr` into `xburn.nr`. Reference for the EVM pool: Tornado Cash
+(a Solidity Poseidon Merkle tree + nullifier mapping — proven feasible).
+
+**B.12.1 Note & crypto model (unchanged; shared by both chains).**
+- Commitment `C = hash_4[token_id, amount, owner, blinding]`, `owner =
+  hash_1[spend_key]`; nullifier `N = hash_2[C, spend_key]` — Poseidon(BN254 x5),
+  identical on both chains (A.7 / M0 parity). Same as B.4 / `crates/common`.
+- `token_id` is the chain-agnostic asset id: `to_field(mint)` for a Solana SPL, the
+  same 32-byte field on EVM (matches OpaqMint's `bytes32 tokenId`).
+- Both chains hold a depth-24 incremental Poseidon Merkle tree (ring buffer of ~32
+  recent roots) + an append-only nullifier set. Solana: exists
+  (`crates/common::tree`, `programs/opaq`). EVM: NEW (B.12.4).
+
+**B.12.2 Unified circuit — `circuits/xburn/src/main.nr`** (generalizes `burn.nr`):
+bind the *destination note commitment* instead of a public `dest_address`. A
+cross-chain **1-in / 1-out** transfer (full amount; no change/fee in v1):
+
+```
+fn main(
+    src_merkle_root: pub Field,   // a known recent root of the SOURCE tree
+    src_nullifier:   pub Field,   // recorded on source; attested to the dest
+    dest_chain:      pub Field,   // destination chain id (bound; can't be redirected)
+    out_commitment:  pub Field,   // note to insert on the DESTINATION tree
+    token_id: Field, amount: Field,               // private, conserved (in == out)
+    src_spend_key: Field, src_blinding: Field,
+    src_merkle_path: [Field; 24], src_merkle_path_indices: [bool; 24],
+    dest_owner_pubkey: Field, dest_blinding: Field,
+)
+```
+Constraints (mirror `burn.nr` + `transfer.nr` conservation):
+1. `amount.assert_max_bit_size::<64>()` — load-bearing for soundness (B.4.1).
+2. `src_owner = hash_1[src_spend_key]`; `src_commitment = hash_4[token_id, amount, src_owner, src_blinding]`.
+3. Fold `src_commitment` up `src_merkle_path/indices` and assert `== src_merkle_root`.
+4. `assert(hash_2[src_commitment, src_spend_key] == src_nullifier)`.
+5. `assert(out_commitment == hash_4[token_id, amount, dest_owner_pubkey, dest_blinding])`
+   — SAME `token_id` + `amount` ⇒ asset & value conserved across chains, both hidden.
+6. `std::as_witness(dest_chain)` (keep it a bound public input).
+
+Public inputs (4): `[src_merkle_root, src_nullifier, dest_chain, out_commitment]`;
+Groth16/BN254, power 16; `nr_pubinputs = 4`.
+
+**B.12.3 Cross-chain flow (identical both ways; A = source, B = dest).**
+1. **Source `xburn` tx (A):** verify proof against a *known recent root of A* (A
+   checks its own tree — no trust); reject if `src_nullifier` already spent; record
+   it. No insert on A, no token release (value locked).
+2. **Attestation:** operator mirrors A's finalized `src_nullifier` to B via
+   `addPending(src_nullifier)` (A.9 — the ONLY trust; endgame = light client on B).
+3. **Destination `mint_from_xburn` tx (B):** verify the SAME proof; require
+   `pending[src_nullifier] && !minted[src_nullifier]`; require `dest_chain == B`;
+   `tree_insert(out_commitment)`; set `minted[src_nullifier]`. Re-shielded on B.
+
+B never validates A's root — mirroring the *burned-nullifier set* (not roots) is
+sufficient (same argument as §6 / A.9): A's `xburn` already enforced a valid root
+before recording the nullifier.
+
+**B.12.4 EVM shielded pool — `evm/src/OpaqPool.sol`** (replaces `OpaqMint`). Tornado-
+style pool speaking Opaq's note format:
+- **State:** incremental Poseidon Merkle tree (depth 24, ring buffer of recent
+  roots) + `mapping(bytes32=>bool) nullifierSpent | pendingMint | minted`.
+  Poseidon(BN254 x5) via a Solidity/Yul impl byte-identical to light-poseidon /
+  `sol_poseidon` (GATE: extend M0 parity to the EVM Poseidon — see B.12.9).
+- **`xburn(a,b,c,[srcRoot,nullifier,destChain,outCommitment])`:** verify Groth16
+  (existing `Groth16Verifier.sol`); require `srcRoot` is a known recent root of THIS
+  pool; require `!nullifierSpent[nullifier]`; set it; emit `XBurned(...)`.
+- **`addPending(bytes32 nullifier)` (onlyOperator):** mirror a finalized Solana xburn.
+- **`mint_from_xburn(a,b,c,signals)`:** require `pending && !minted`; `destChain ==
+  block.chainid`; verify proof; insert `outCommitment`; set `minted`.
+- **`deposit(commitment)` (optional):** escrow an ERC-20 + insert a note — only for
+  EVM-native assets; Solana-origin assets are fed purely by `mint_from_xburn`.
+
+**B.12.5 Solana side.**
+- **`xburn` instruction:** today's tag-4 `burn`, but the circuit's 4 public inputs
+  become `[merkle_root, nullifier, dest_chain, out_commitment]` (no token_id/amount/
+  dest_address in the clear). Regenerate `vk_burn`→`vk_xburn`; set `nr_pubinputs=4`.
+- **`mint_from_xburn` (NEW):** accounts `[payer(signer,w), commitment_tree(w),
+  pending_set(w), system]`; args = proof + `[src_root, src_nullifier,
+  dest_chain=SOLANA_ID, out_commitment]`. Verify Groth16 (`XBURN_VK`); require the
+  EVM `src_nullifier` is attested pending (operator-mirrored into a Solana
+  `pendingMint` PDA) and not minted; require `dest_chain == SOLANA_CHAIN_ID`;
+  `tree_insert(out_commitment)`; mark minted. Reuses the existing verifier +
+  `tree_insert` + a new pending/minted PDA mirroring OpaqMint's mappings.
+
+**B.12.6 Attestation & trust (A.9, shared, direction-agnostic).** Each direction
+mirrors the source's finalized nullifier into the destination's `pending` set via
+the operator (attests a boolean, never a secret — the proof binds nullifier ↔
+(token, amount, out_commitment)). `dest_chain` binding prevents redirection.
+Zero-infra endgame: a light client of the *source* chain on the *destination* (A.9
+rung 4) — the one real research item.
+
+**B.12.7 Migration from OpaqMint.** Retire `OpaqMint` (balanceOf ledger); the
+forward path's EVM mint changes from "credit balanceOf" to "insert out_commitment"
+(`OpaqPool.mint_from_xburn`). `burn.nr`'s public `dest_address` is dropped for
+`out_commitment` (recipient private on both chains). Update m15/m17/m18 to assert a
+tree insert + a spendable EVM note instead of a balance.
+
+**B.12.8 Build phases (each a commit + milestone, like P2/P3).**
+- **P4.0 — `xburn.nr`** + `gen_witness` fixture + Groth16 prove/verify off-chain
+  (mirror P2.0/P3.0). *Accept:* proof verifies; 4 public inputs; value conserved +
+  amount range-checked; a tampered `out_commitment`/`token_id`/`amount` fails.
+- **P4.1 — Solana `mint_from_xburn`** + `xburn` migration + `vk_xburn`; e2e **m19**:
+  an EVM-origin xburn proof (fixture) mints a note on Solana; double-mint, wrong
+  `dest_chain`, and unattested nullifier all rejected.
+- **P4.2 — `OpaqPool.sol`** (Poseidon Merkle + nullifiers + xburn + mint_from_xburn)
+  with an M0-style Poseidon parity gate (EVM == circuit == Solana); Foundry tests.
+- **P4.3 — round-trip both ways, e2e m20:** Solana note → EVM note (forward,
+  re-shield) and EVM note → Solana note (reverse), one proof each, live on validator
+  + anvil (mirrors m18).
+
+**B.12.9 Open questions / risks.**
+- **EVM Poseidon gas:** a depth-24 Poseidon insert on EVM is expensive; benchmark
+  early (Tornado's insert is ~1–2M gas — the reference budget). Do NOT swap the hash
+  to save gas unless three-way parity (A.7) is preserved.
+- **Poseidon parity across three impls** (Noir circuit, Solana syscall, EVM Yul) is
+  the #1 risk (A.7) — extend M0's parity gate to the EVM impl before trusting it.
+- **1-in/1-out only** (full-amount move, no change): partial cross-chain amounts
+  need 1-in/2-out (a change note on the source) — defer to a P4.1.5 if wanted.
+- **Attestation** stays semi-trusted until the light client (A.9) — unchanged from
+  the forward direction.
