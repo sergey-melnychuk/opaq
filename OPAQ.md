@@ -931,11 +931,13 @@ the prioritized pipeline of what to do *next* is right here:
    `tools/noir-groth16` backend (ideally replaced by a minimal owned ACIR→R1CS for
    just `AssertZero`+`RANGE`), and `evm/OpaqMint.sol` + the generated verifier. The
    self-review (#2) found+fixed 2 real bugs but is not a substitute.
-3. **Make the bridge drivable**: an `opaq burn` CLI verb (the instruction exists,
-   the verb doesn't) + a permissionless relay that carries a burn proof to the EVM
-   mint, then the **ICP operator canister** (A.9 ladder rung 2 — watch Solana,
-   `addPending`, threshold-sign both chains). Reverse direction (EVM burn → Solana
-   mint) after.
+3. **Make the bridge drivable — FORWARD SIDE DONE (P3.2–P3.5).** `opaq burn`
+   (`--prove`/`--submit`, self-served Solana burn; verified by m16) + `evm/mint.mjs`
+   (turns the burn proof into an `OpaqMint.mint` call via Foundry `cast`, self-served
+   EVM mint; verified by m17) let one person drive burn→mint with **no relayer**, on
+   a live validator and anvil. Remaining: the **attestation** gating `addPending` —
+   an ICP operator canister (A.9 rung 2) or, zero-infra, an on-chain Solana light
+   client (rung 4); and the **reverse direction** (EVM burn → Solana mint).
 4. **Received-note discovery** (wallet UX): today transfer outputs are handed over
    out-of-band. Add encrypted memos (sender posts a ciphertext to the recipient's
    viewing key, recipient scans + trial-decrypts) or HD-derived notes, plus an
@@ -1038,7 +1040,7 @@ Phase 1, so the anonymity set is only identical-`(token, amount)` transfers).
 Until Phase 2, treat the privacy as "unlinkable only within an identical-amount
 crowd."
 
-**6. Phase 3 — cross-chain burn/mint (A.6). SOLANA SIDE DONE (P3.0–P3.1).**
+**6. Phase 3 — cross-chain burn/mint (A.6). FORWARD BRIDGE DONE + DRIVABLE (P3.0–P3.5).**
 `circuits/burn/src/main.nr` (`withdraw` with `recipient` swapped for the bound EVM
 destination `(dest_chain, dest_address)` and no SPL release; 16.4k ACIR, 0 Brillig,
 power 16) AND the on-chain `burn` instruction (tag 4: verify → root-recent → record
@@ -1054,8 +1056,10 @@ A finding fell out of it: the insecure zero-contribution ceremony's degenerate V
 `IC` points are tolerated by snarkjs/groth16-solana but **rejected by the EVM
 `ecMul` precompile** — so the EVM verifier requires a non-degenerate (properly
 contributed) VK; m15 uses the real PPoT ptau (which also corroborates the §B.6
-ceremony tooling end-to-end). Remaining: the permissionless relay (the user
-submits the burn proof to EVM themselves) and the reverse direction.
+ceremony tooling end-to-end). The **self-served drive is now built (P3.2–P3.5)**:
+`opaq burn --submit` broadcasts the Solana burn (m16) and `evm/mint.mjs` submits the
+EVM mint from the same burn proof (m17) — no relayer, both verified live. Remaining:
+the `addPending` attestation (A.9 ladder) and the reverse direction (EVM→Solana).
 
 **Trust model — see the A.9 ladder.** The EVM mint does NOT need to validate the
 Solana root: the Solana `burn` instruction already enforced a valid root before

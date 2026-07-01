@@ -586,7 +586,10 @@ fn prove_and_emit(
     let pid = std::process::id();
     let inputs_path = tmp.join(format!("opaq-{circuit}-inputs-{pid}.json"));
     let sidecar_path = tmp.join(format!("opaq-{circuit}-sidecar-{pid}.json"));
-    let provedir = tmp.join(format!("opaq-{circuit}-prove-{pid}"));
+    let provedir = match f.get("prove-dir") {
+        Some(d) => std::path::PathBuf::from(d),
+        None => tmp.join(format!("opaq-{circuit}-prove-{pid}")),
+    };
     std::fs::write(&inputs_path, inputs).map_err(|e| format!("write inputs: {e}"))?;
     std::fs::write(&sidecar_path, sidecar).map_err(|e| format!("write sidecar: {e}"))?;
 
@@ -598,7 +601,13 @@ fn prove_and_emit(
         "run", "-q", "--manifest-path", &format!("{root}/crates/groth16-verify/Cargo.toml"),
         "--bin", "emit_opaq_instruction", "--",
         circuit, provedir.to_str().unwrap(), sidecar_path.to_str().unwrap(), out,
-    ])
+    ])?;
+    // With --prove-dir, the snarkjs proof.json + public.json are left for the caller
+    // — e.g. `opaq burn` output that feeds evm/mint.mjs for the cross-chain mint.
+    if let Some(d) = f.get("prove-dir") {
+        println!("  proof artifacts -> {d}/ (proof.json + public.json — feed to evm/mint.mjs)");
+    }
+    Ok(())
 }
 
 /// Sign + broadcast a withdraw tx via the node submit helper (chain I/O stays in
