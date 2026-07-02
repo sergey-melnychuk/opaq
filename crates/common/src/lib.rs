@@ -8,6 +8,7 @@ use ark_bn254::Fr;
 
 pub mod nullifier;
 pub mod tree;
+pub mod viewkey;
 
 /// Original Poseidon (Circom BN254 params) over N 32-byte big-endian field
 /// elements, returning a 32-byte big-endian field element — matching the
