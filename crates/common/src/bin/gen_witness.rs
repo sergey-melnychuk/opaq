@@ -173,6 +173,59 @@ fn main() {
     );
     fs::write(circuits_dir.join("burn_values.json"), burn_sidecar).unwrap();
 
+    // --- xburn/Prover.toml (Phase 4, P4.0): symmetric cross-chain burn ---
+    // Reuses the same source note/path as withdraw/burn above (leaf 0). The
+    // destination note gets a fresh owner + blinding, same token_id/amount
+    // (B.12.2 conservation).
+    let dest_owner_pubkey = poseidon_be(&[be32(848_484_848)]);
+    let dest_blinding = be32(272_727_272);
+    let out_commitment = poseidon_be(&[token_id, amount, dest_owner_pubkey, dest_blinding]);
+    let xburn = format!(
+        "src_merkle_root = \"{}\"\nsrc_nullifier = \"{}\"\ndest_chain = \"{}\"\nout_commitment = \"{}\"\n\
+         token_id = \"{}\"\namount = \"{}\"\nsrc_spend_key = \"{}\"\nsrc_blinding = \"{}\"\n\
+         src_merkle_path = [{}]\nsrc_merkle_path_indices = [{}]\n\
+         dest_owner_pubkey = \"{}\"\ndest_blinding = \"{}\"\n",
+        field_hex(&merkle_root), field_hex(&nullifier), field_hex(&dest_chain), field_hex(&out_commitment),
+        field_hex(&token_id), field_hex(&amount), field_hex(&spend_key), field_hex(&blinding),
+        path_list, idx_list,
+        field_hex(&dest_owner_pubkey), field_hex(&dest_blinding),
+    );
+    write(&circuits_dir, "xburn", &xburn);
+    write_json(
+        &circuits_dir,
+        "xburn",
+        &[
+            ("src_merkle_root", field_hex(&merkle_root)),
+            ("src_nullifier", field_hex(&nullifier)),
+            ("dest_chain", field_hex(&dest_chain)),
+            ("out_commitment", field_hex(&out_commitment)),
+            ("token_id", field_hex(&token_id)),
+            ("amount", field_hex(&amount)),
+            ("src_spend_key", field_hex(&spend_key)),
+            ("src_blinding", field_hex(&blinding)),
+            ("dest_owner_pubkey", field_hex(&dest_owner_pubkey)),
+            ("dest_blinding", field_hex(&dest_blinding)),
+        ],
+        &[
+            ("src_merkle_path", siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect()),
+            ("src_merkle_path_indices", right.iter().map(|b| b.to_string()).collect()),
+        ],
+    );
+    // xburn sidecar for on-chain instruction assembly (P4.1): source nullifier,
+    // dest_chain, and out_commitment for the destination mint.
+    let xburn_sidecar = format!(
+        "{{\"mint_hex\":\"{}\",\"amount\":{},\"src_commitment\":\"{}\",\"src_nullifier\":\"{}\",\
+         \"src_merkle_root\":\"{}\",\"dest_chain\":\"{}\",\"out_commitment\":\"{}\"}}\n",
+        hex::encode(mint_bytes),
+        amount_u64,
+        hex::encode(commitment),
+        hex::encode(nullifier),
+        hex::encode(merkle_root),
+        hex::encode(dest_chain),
+        hex::encode(out_commitment),
+    );
+    fs::write(circuits_dir.join("xburn_values.json"), xburn_sidecar).unwrap();
+
     // --- transfer/Prover.toml (Phase 2, P2.1): 2-in/2-out join-split ---
     // input[0]: the real note above (leaf 0, reusing the withdraw merkle setup).
     // input[1]: a dummy (amount 0). Split A into out[0]=B (to recipient) + out[1]=
