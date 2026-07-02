@@ -1,4 +1,4 @@
-# Native Solana program (NOT Anchor — per project preference).
+# Native Solana program.
 # Standalone workspace; build: cargo build-sbf --tools-version v1.54
 [workspace]
 

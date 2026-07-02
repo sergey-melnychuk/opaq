@@ -1,4 +1,4 @@
-//! Opaq — native Solana privacy pool program (OPAQ.md B.5). NOT Anchor.
+//! Opaq — native Solana privacy pool program (OPAQ.md B.5).
 //!
 //! Instruction dispatch on the first data byte:
 //!   0 = initialize_pool   (1 = deposit, 2 = withdraw — added next)

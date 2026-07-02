@@ -6,7 +6,7 @@ Opaq is a Solana-native **privacy pool** for SPL tokens: shield a deposit behind
 a zero-knowledge commitment, then withdraw to a fresh address with no on-chain
 link to the deposit. UTXO model (commitments + nullifiers), a single shared
 Poseidon Merkle tree, Groth16 proofs over BN254, and a **bare native** Solana
-program (no Anchor).
+program.
 
 **Phase 1 works end-to-end on a validator** — a real shielded deposit →
 withdraw round-trip, with double-spend prevention, amount/recipient binding,
@@ -100,7 +100,7 @@ and Phase 3 (cross-chain burn/mint).
 ## Sidenote: on-chain toys
 
 Two throwaway native-Solana programs sit under `programs/` as playful demos of
-the same bare-metal, no-Anchor style the pool uses — unrelated to Opaq, just for
+the same bare-metal style the pool uses — unrelated to Opaq, just for
 fun: `tamagotchi` (an on-chain pet whose stats decay against the `Clock` slot)
 and `rplace` (a shared 32×32 pixel canvas). `scripts/fun-demo.sh` builds both,
 starts a validator, and renders them in the terminal.

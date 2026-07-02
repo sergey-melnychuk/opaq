@@ -1,4 +1,4 @@
-//! On-chain r/place (raw native Solana, no Anchor). One global 32×32 canvas in a
+//! On-chain r/place (native Solana). One global 32×32 canvas in a
 //! PDA seeded by ["canvas"] — 1024 bytes, one palette index (0..15) per pixel.
 //! Anyone can paint any pixel, any time. Collaborative pixel art (and griefing).
 //!

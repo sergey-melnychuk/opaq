@@ -1,4 +1,4 @@
-//! On-chain Tamagotchi (raw native Solana, no Anchor). One pet per owner, in a
+//! On-chain Tamagotchi (native Solana). One pet per owner, in a
 //! PDA seeded by ["pet", owner]. The pet's stats DECAY with on-chain time: the
 //! `Clock` sysvar's slot is the clock, and hunger climbs / happiness + energy
 //! fall by the number of slots elapsed since the last interaction. Feed it, play

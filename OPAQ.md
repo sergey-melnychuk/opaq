@@ -74,7 +74,7 @@ UltraHonk/UltraPlonk Proof (BN254)
        │
        │ submit transaction
        ▼
-Solana Program (Anchor)
+Solana Program (native solana-program)
        │  verifies proof via alt_bn128 syscalls
        │  checks nullifier not already spent
        │  checks merkle root matches current tree state
@@ -89,9 +89,9 @@ Vault PDA (holds actual SPL tokens) + Commitment Tree PDA + Nullifier Set PDA
 
 **2. Off-chain Prover (`crates/prover`)** — Rust CLI wrapping `nargo`/`bb` calls plus Solana RPC interaction. Full spec in Part B.
 
-**3. Solana Program (`programs/opaq`)** — Anchor program holding the vaults, commitment tree, and nullifier set. Full spec in Part B.
+**3. Solana Program (`programs/opaq`)** — a **barebone native Solana program** (`solana-program` + `borsh` only) holding the vaults, commitment tree, and nullifier set. Instructions are dispatched on the first byte of instruction data (0 = `initialize_pool`, 1 = `deposit`, 2 = `withdraw`, 3 = `transfer`, 4 = `burn`); accounts are PDAs holding borsh-serialized state, parsed/written by hand. Full spec in Part B.
 
-**4. BN254 Verifier (`programs/opaq/src/verifier.rs`)** — the piece that doesn't exist off-the-shelf yet: an UltraHonk/UltraPlonk verifier in Rust/Anchor using Solana's native `alt_bn128` syscalls for the pairing checks. Genuinely new open-source surface area — the math is published, the syscalls exist, but no turnkey crate does this today. Full spec in Part B, Section B.6.
+**4. BN254 Verifier** — the piece that doesn't exist off-the-shelf yet: proof verification using Solana's native `alt_bn128` syscalls for the pairing checks, called directly from the native program (via the `groth16-solana` crate — see B.6's resolution). Full spec in Part B, Section B.6.
 
 ### A.5 Repository Structure
 
@@ -346,10 +346,11 @@ immediately on install and do not drift mid-project.
 | Noir / `nargo` | `1.0.0-beta.22` (installed & verified by M0; newer beta than the original beta.20 pin, sanctioned per this row's guidance) | `noirup --version 1.0.0-beta.22` |
 | Barretenberg / `bb` | `5.0.0-nightly.20260522` (installed; verify it pairs with nargo beta.22 before proof work at M1) | installed via `bbup` or bundled with `noirup` |
 | `noir-lang/poseidon` library | `v0.3.0` (verified compatible with nargo beta.22 by the M0 spike). **Module path is `poseidon::poseidon::bn254::*`, not `dep::poseidon::bn254::*`** — see B.4.1. | `poseidon = { git = "https://github.com/noir-lang/poseidon", tag = "v0.3.0" }` in `Nargo.toml` |
-| Anchor | **`anchor-lang` 1.1.1** (latest 1.x; spec's 1.0.0 target was real, now superseded). Verified: builds cleanly for SBF with platform-tools v1.54. The 1.x line aligns with solana 3.x; 0.32.1 (the installed CLI) is the solana-2.x era — don't use it. Build the program directly with `cargo build-sbf --tools-version v1.54` (avoids the CLI's bundled toolchain). Install matching CLI `avm install 1.1.1` only when IDL/`anchor test` is needed. | `anchor-lang = "1.1"` in Cargo.toml |
+| `solana-program` (Rust crate) | `3.x` (matches Agave 3.0.15). The program is barebone native Solana: hand-rolled instruction dispatch on a tag byte, `borsh` for account (de)serialization, no framework macros, no IDL. | `solana-program = "3"` in Cargo.toml |
+| `borsh` (Rust crate) | `1.x` | `borsh = "1"` in Cargo.toml |
 | Solana CLI / Agave | `3.0.15` (installed & used for the M0 validator deploy) | `agave-install` |
 | **SBF platform-tools** | **`v1.54` (ships rust/cargo `1.89`).** The default bundled with `cargo build-sbf` here is **v1.51 (cargo 1.84)**, which **cannot build any solana 3.x program** — the 3.x dep graph transitively requires `edition2024` (`wincode`, `zeroize 1.9`, `blake3 1.8 → cmov`, `toml_edit 0.25`…), unsupported before cargo 1.85, and `build-sbf` fails at manifest-parse time. Install once: `cargo build-sbf --install-only --force-tools-install --tools-version v1.54`, then **always pass `--tools-version v1.54`** to `cargo build-sbf`. Discovered while closing M0's on-chain leg. | `cargo build-sbf --tools-version v1.54` |
-| Rust | toolchain pinned via `rust-toolchain.toml` at repo root — use whatever stable version Anchor 1.0.0's docs specify | `rustup` |
+| Rust | toolchain pinned via `rust-toolchain.toml` at repo root | `rustup` |
 | `light-poseidon` (Rust crate, off-chain prover) | `^0.4.0` | Cargo dependency |
 | `solana-poseidon` (Rust crate, on-chain program) | latest `3.x` (confirm exact patch on crates.io at setup time) | Cargo dependency |
 | `ark-bn254` (Rust crate) | `^0.5.0` (match whatever `solana-poseidon` 3.x pins internally to avoid duplicate-version build errors) | Cargo dependency |
@@ -383,7 +384,8 @@ stage.
 **On-chain tree storage layout (store the frontier, not every leaf):**
 Storing every leaf on-chain is wasteful and unnecessary. Use the standard
 incremental Merkle tree pattern (same approach Tornado Cash's
-`MerkleTreeWithHistory.sol` uses, adapted to an Anchor account):
+`MerkleTreeWithHistory.sol` uses, adapted to a native, borsh-serialized PDA
+account):
 
 ```rust
 pub struct CommitmentTree {
@@ -436,13 +438,13 @@ the chain.
 ```bash
 # 1. Toolchain
 noirup --version 1.0.0-beta.20
-avm install 1.0.0 && avm use 1.0.0
-agave-install init <latest-stable-matching-anchor>
+agave-install init <latest-stable>
 
-# 2. Scaffold
-anchor init opaq --no-git
+# 2. Scaffold — plain cargo workspace
+cargo new --lib opaq --vcs none
 cd opaq
-mkdir -p circuits/deposit circuits/withdraw crates/prover crates/common
+mkdir -p circuits/deposit circuits/withdraw crates/prover crates/common programs/opaq/src
+cargo new --lib programs/opaq --vcs none   # solana-program + borsh
 
 # 3. Noir circuit packages
 cd circuits/deposit && nargo init --name deposit && cd ../..
@@ -596,18 +598,24 @@ prove/verify (needs ceremony power ~17–18, ~2× withdraw), then the on-chain
 no vault), `vk_transfer`, an `opaq transfer` CLI, and a deposit→transfer→withdraw
 e2e. NOT yet proven.
 
-### B.5 Solana Program Spec (Anchor)
+### B.5 Solana Program Spec (native Solana)
+
+The program is `solana-program` + `borsh` only. `process_instruction` dispatches
+on the first byte of instruction data (0/1/2/3/4 = `initialize_pool`/`deposit`/
+`withdraw`/`transfer`/`burn`); every account struct below is a plain
+`#[derive(BorshSerialize, BorshDeserialize)]` type manually (de)serialized from
+PDA account data — no framework macros, no generated IDL.
 
 **B.5.1 Accounts**
 
-```rust
-#[account]
-pub struct Vault {
-    pub token_mint: Pubkey,
-    pub bump: u8,
-}
+No separate `Vault` state account: the vault is the SPL token account itself —
+the canonical Associated Token Account of a `vault_authority` PDA
+(`[VAULT_SEED]`) for the given mint, re-derived and checked on every
+deposit/withdraw (B.2 "why single PDAs"). `CommitmentTree` and `NullifierSet`
+are the only custom accounts, both single global PDAs:
 
-#[account]
+```rust
+#[derive(BorshSerialize, BorshDeserialize)]
 pub struct CommitmentTree {
     pub next_index: u64,
     pub filled_subtrees: [[u8; 32]; 24],
@@ -615,7 +623,7 @@ pub struct CommitmentTree {
     pub current_root_index: u8,
 }
 
-#[account]
+#[derive(BorshSerialize, BorshDeserialize)]
 pub struct NullifierSet {
     pub count: u64,
     pub nullifiers: Vec<[u8; 32]>,
@@ -652,7 +660,7 @@ verifier. This must be hand-built. Concretely:
 1. Run `bb write_vk` against the compiled withdraw circuit to get the verification key.
 2. Study the verification key structure and the pairing-check equation Barretenberg's UltraHonk verifier uses (the published math, not Barretenberg's Solidity codegen, since Solana needs different serialization/calling conventions than EVM).
 3. Implement the equivalent checks in Rust using `solana_program::alt_bn128::{alt_bn128_addition, alt_bn128_multiplication, alt_bn128_pairing}` syscalls.
-4. **Before wiring this into the pool program**, write a standalone test: generate a valid proof with `bb prove`, generate an invalid one (flip one byte), and confirm the Solana-side verifier accepts the valid one and rejects the invalid one. Do this in isolation, outside the Anchor program, before integrating.
+4. **Before wiring this into the pool program**, write a standalone test: generate a valid proof with `bb prove`, generate an invalid one (flip one byte), and confirm the Solana-side verifier accepts the valid one and rejects the invalid one. Do this in isolation, outside the pool program, before integrating.
 
 **Reference material to study first, not to copy blindly (license/correctness
 varies):** Light Protocol's on-chain BN254 verifier code (they already do
@@ -942,10 +950,12 @@ the prioritized pipeline of what to do *next* is right here:
    a live validator and anvil. Remaining: the **attestation** gating `addPending` —
    an ICP operator canister (A.9 rung 2) or, zero-infra, an on-chain Solana light
    client (rung 4); and the **reverse direction** (EVM burn → Solana mint).
-4. **Received-note discovery** (wallet UX): today transfer outputs are handed over
-   out-of-band. Add encrypted memos (sender posts a ciphertext to the recipient's
-   viewing key, recipient scans + trial-decrypts) or HD-derived notes, plus an
-   `opaq list-unspent` (one nullifier-set read + local checks) and a note store.
+4. **Received-note discovery** (wallet UX) — **now spec'd, see B.13.** Today
+   transfer outputs are handed over out-of-band. B.13 specs an independent
+   X25519 `view_key` (separate from `spend_key`, rotatable, per-note encrypted
+   memos riding along in the `transfer` instruction's own data — zero circuit
+   or ceremony impact) plus `opaq list-unspent`. Not yet implemented (P2.5.0
+   in progress).
 5. **Phase 1.5 perf** (non-blocking): swap the O(n) nullifier scan for a
    sorted/hash-table set before mainnet scale (measured headroom ~41k nullifiers,
    ~31 CU each).
@@ -1204,3 +1214,120 @@ tree insert + a spendable EVM note instead of a balance.
   need 1-in/2-out (a change note on the source) — defer to a P4.1.5 if wanted.
 - **Attestation** stays semi-trusted until the light client (A.9) — unchanged from
   the forward direction.
+
+### B.13 Viewing Keys & Received-Note Discovery (Phase 2.5)
+
+**Problem (B.11 item #4).** A note's owner is authenticated by `spend_key`
+(`owner_pubkey = Poseidon(spend_key)`, B.2) — but `spend_key` alone cannot find
+which on-chain commitments belong to you. `commitment = Poseidon(token_id,
+amount, owner_pubkey, blinding_factor)` is one opaque hash of four inputs; even
+knowing your own `owner_pubkey`, you can't unhash a leaf to recover the
+`amount`/`blinding_factor` needed to spend it, and `blinding_factor` is an
+unguessable random field element. For self-created notes (`deposit`, a
+`transfer`'s own change output) this is moot — the CLI already knows every
+field because it generated them. It only bites for notes *someone else* sends
+you (a `transfer` output to your `owner_pubkey`), which today require
+out-of-band delivery of `(amount, blinding_factor)`. This section specs the
+fix: an independent viewing key that lets a recipient discover incoming notes
+without being told anything out-of-band.
+
+**B.13.1 Two independent secrets, not one.** A user holds:
+- `spend_key` (existing, B.2) — spend authority. `owner_pubkey =
+  Poseidon(spend_key)` is permanently embedded in every commitment the user
+  owns. Compromise = theft; the only remedy is racing to move funds to a fresh
+  identity. **Not rotatable in place.**
+- `view_key` (new) — an **independent** X25519 scalar, unrelated to
+  `spend_key`/BN254. Its public half `viewing_pubkey` is published alongside
+  `owner_pubkey`. Compromise = past incoming-note metadata is exposed (see
+  B.13.5); **rotatable for free** — generate a new `view_key`, publish a new
+  `viewing_pubkey`, `owner_pubkey`/`spend_key`/existing notes are untouched, no
+  transaction required.
+
+  `view_key` must **not** be derived from `spend_key` (e.g.
+  `Poseidon(spend_key, tag)`). If it were, rotating it would be impossible
+  without abandoning `owner_pubkey` too — since `owner_pubkey` is baked into
+  every existing commitment, that would force moving all funds to a new
+  identity just to rotate a *viewing* key. Keeping the two secrets independent
+  from day one is what makes rotation cheap (B.13.5). This mirrors Zcash
+  Sapling's `ak`/`nk` (spend) vs `ivk` (viewing) split.
+
+**B.13.2 Meta-address.** A user's published receive address is the pair
+`(owner_pubkey: Field, viewing_pubkey: [u8; 32])` — an X25519 public key
+alongside the existing BN254 `owner_pubkey`. This is the only thing a sender
+needs; `spend_key`/`view_key` themselves never leave the recipient.
+
+**B.13.3 Sender side (`transfer` producing an output for B).** For each
+non-dummy output note owned by someone else's meta-address, `opaq transfer`
+additionally:
+1. Generates a fresh ephemeral X25519 keypair `(esk, epk)`.
+2. `shared_secret = X25519(esk, B.viewing_pubkey)`.
+3. `sym_key = KDF(shared_secret)` (BLAKE3, keyed/derive_key mode — no new
+   dependency family beyond what a KDF needs).
+4. `plaintext = token_id ‖ amount ‖ blinding_factor` (3 × 32-byte BE field
+   encodings = 96 bytes — everything needed to reconstruct the commitment and,
+   with `spend_key`, the nullifier).
+5. `ciphertext = ChaCha20Poly1305(sym_key, nonce, plaintext)` — reuses the
+   same AEAD already used for note-at-rest encryption (B.7), just keyed via
+   ECDH instead of a passphrase.
+6. `memo = epk (32B) ‖ nonce (12B) ‖ ciphertext (96B + 16B tag)` = **156
+   bytes** per recipient-owned output.
+
+**B.13.4 Transport — zero circuit/ceremony impact.** The memo is **not** a
+circuit input and carries no public-input weight: it's appended as a trailing,
+optional section of the `transfer` instruction's own data, one memo per
+non-dummy output that isn't a change-to-self. The program does not need to
+parse or store it — it only reads the fixed proof + public-input prefix it
+already expects; the memo simply rides along in the transaction's permanent
+instruction data, retrievable by any RPC client via `getTransaction` (same
+zero-infra posture as A.8, same pattern the read path already uses per M10).
+Because this never touches `circuits/transfer/src/main.nr`'s public inputs,
+**no new Groth16 setup or ceremony is needed** — this is purely a wallet-layer
+addition on top of the existing, already-proven `transfer` circuit.
+
+**B.13.5 Discovery (`opaq list-unspent`, B's side).**
+1. Fetch all `transfer` transactions from program history
+   (`getSignaturesForAddress` + `getTransaction`, per M10's read path).
+2. Extract each transaction's trailing memo(s).
+3. For each: `shared_secret = X25519(view_key, epk)`; attempt
+   `ChaCha20Poly1305` decryption. Failure = not yours, skip (cheap; trial
+   decryption over the whole history is the scan cost, same shape as Zcash's).
+4. On success, recompute `commitment = Poseidon(token_id, amount, owner_pubkey,
+   blinding_factor)` (using the *local* `owner_pubkey`, derived from
+   `spend_key`) and check it equals one of that transaction's logged
+   `out_commitment`s — defends against a malformed or misdirected memo.
+5. On match: a genuine incoming note. Locate its `leaf_index` and Merkle path
+   via the existing M10 `reconstruct_path`-by-commitment-value machinery
+   (already built, no changes needed). Compute `nullifier =
+   Poseidon(commitment, spend_key)` and check absence from the on-chain
+   `NullifierSet` to confirm it's still unspent.
+
+**Rotation bound (be honest about this):** rotating `view_key` protects only
+*future* memos. Every ciphertext already posted under the old
+`viewing_pubkey` is permanently public on an immutable ledger — anyone who
+captured the old `view_key` before rotation can still decrypt that history
+forever. This is inherent to publishing ciphertexts on-chain, not fixable
+in-protocol; rotation bounds exposure going forward, it doesn't undo the past.
+Treat a `view_key` leak the same way A.12 treats amount fingerprinting: a
+real, named, permanent leak of *that* window's metadata, not an emergency
+requiring funds to move (unlike a `spend_key` leak, which is).
+
+**B.13.6 Scope.** v1 covers `transfer` output notes only (the B.11 #4 gap).
+`xburn`'s destination note (B.12.2's `dest_owner_pubkey`/`dest_blinding`) has
+the identical discovery problem on the *other* chain — the same memo scheme
+should eventually extend there too — but that's follow-on work once B.12 is
+built, not part of this section's scope.
+
+**B.13.7 Build phase (P2.5).**
+- **P2.5.0** — `crates/common::viewkey`: X25519 keygen, ECDH, BLAKE3 KDF,
+  ChaCha20Poly1305 encrypt/decrypt of the 96-byte note-opening payload,
+  meta-address encode/decode. Unit tests: encrypt/decrypt round-trip; wrong
+  `view_key` fails to decrypt; two independently-generated `view_key`s never
+  collide; rotating `view_key` doesn't change `owner_pubkey`.
+- **P2.5.1** — wire the memo into `opaq transfer` (sender) and the on-chain
+  `transfer` instruction's trailing data (no verification logic needed there —
+  see B.13.4).
+- **P2.5.2** — `opaq list-unspent` (recipient scan per B.13.5), plus a note
+  store so discovered notes persist locally like self-created ones.
+- **Accept:** A sends a transfer to B's meta-address; B, holding only
+  `(spend_key, view_key)` and zero out-of-band info, runs `opaq list-unspent`
+  and recovers the note, then withdraws it — e2e on a validator.
