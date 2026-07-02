@@ -1318,16 +1318,26 @@ should eventually extend there too — but that's follow-on work once B.12 is
 built, not part of this section's scope.
 
 **B.13.7 Build phase (P2.5).**
-- **P2.5.0** — `crates/common::viewkey`: X25519 keygen, ECDH, BLAKE3 KDF,
+- **[x] P2.5.0** — `crates/common::viewkey`: X25519 keygen, ECDH, BLAKE3 KDF,
   ChaCha20Poly1305 encrypt/decrypt of the 96-byte note-opening payload,
-  meta-address encode/decode. Unit tests: encrypt/decrypt round-trip; wrong
-  `view_key` fails to decrypt; two independently-generated `view_key`s never
-  collide; rotating `view_key` doesn't change `owner_pubkey`.
-- **P2.5.1** — wire the memo into `opaq transfer` (sender) and the on-chain
-  `transfer` instruction's trailing data (no verification logic needed there —
-  see B.13.4).
+  meta-address + `ViewKey` persistence (`to_bytes`/`from_bytes`). 7 unit
+  tests: encrypt/decrypt round-trip; wrong `view_key` fails to decrypt; two
+  independently-generated `view_key`s never collide; rotating `view_key`
+  doesn't change `owner_pubkey`; wire-format round-trip; key persistence
+  round-trip.
+- **[x] P2.5.1** — sender + on-chain trailing-data plumbing:
+  `opaq address --out <file>` generates a fresh `(spend_key, view_key)`
+  identity and prints the public meta-address; `opaq transfer --to-view
+  <hex>` encrypts out0's opening and appends the memo to the instruction
+  blob (`attach_recipient_memo`, unit-tested: appends exactly `Memo::LEN`
+  bytes, leaves the fixed prefix untouched, and the recipient's `view_key`
+  decrypts the appended tail back to the exact opening). On-chain, `transfer`'s
+  length check relaxed from `args.len() != FIXED_LEN` to `args.len() <
+  FIXED_LEN` so the trailing memo doesn't get rejected — the program still
+  never parses it, per B.13.4. **Not yet run against a live validator.**
 - **P2.5.2** — `opaq list-unspent` (recipient scan per B.13.5), plus a note
   store so discovered notes persist locally like self-created ones.
 - **Accept:** A sends a transfer to B's meta-address; B, holding only
   `(spend_key, view_key)` and zero out-of-band info, runs `opaq list-unspent`
-  and recovers the note, then withdraws it — e2e on a validator.
+  and recovers the note, then withdraws it — e2e on a validator. (P2.5.0/1 are
+  verified at the unit level; this full e2e accept criterion lands with P2.5.2.)

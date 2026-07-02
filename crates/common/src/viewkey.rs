@@ -40,6 +40,17 @@ impl ViewKey {
         PublicKey::from(&self.0).to_bytes()
     }
 
+    /// Persist the secret scalar (e.g. into an encrypted identity file) so a
+    /// generated `view_key` survives past the process — mirrors how
+    /// `spend_key` is already stored in a note/identity file.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    pub fn from_bytes(b: [u8; 32]) -> Self {
+        Self(StaticSecret::from(b))
+    }
+
     /// Recipient side of B.13.3/B.13.5: derive the same shared secret an
     /// ephemeral sender key would have produced against our `viewing_pubkey`.
     fn shared_secret(&self, ephemeral_pubkey: &[u8; 32]) -> [u8; 32] {
@@ -204,5 +215,17 @@ mod tests {
         let parsed = Memo::from_bytes(&bytes);
         let opening_out = try_decrypt(&recipient, &parsed).expect("decrypts after wire round-trip");
         assert_eq!(opening_out.amount, opening(300).amount);
+    }
+
+    #[test]
+    fn view_key_persistence_round_trip() {
+        // Storing/reloading the secret (e.g. from an identity file) must
+        // reconstruct a key that decrypts exactly the same as the original.
+        let original = ViewKey::generate();
+        let reloaded = ViewKey::from_bytes(original.to_bytes());
+        assert_eq!(original.viewing_pubkey(), reloaded.viewing_pubkey());
+
+        let memo = encrypt_for(&original.viewing_pubkey(), &opening(400));
+        assert!(try_decrypt(&reloaded, &memo).is_some());
     }
 }

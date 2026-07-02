@@ -34,7 +34,8 @@ fn main() {
         Some("withdraw") => withdraw(&flags(&args[2..])),
         Some("transfer") => transfer(&flags(&args[2..])),
         Some("burn") => burn(&flags(&args[2..])),
-        _ => Err("usage: opaq <deposit|withdraw|transfer|burn> ...".into()),
+        Some("address") => address(&flags(&args[2..])),
+        _ => Err("usage: opaq <deposit|withdraw|transfer|burn|address> ...".into()),
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
@@ -43,6 +44,35 @@ fn main() {
 }
 
 type R = Result<(), String>;
+
+/// OPAQ.md B.13.2: generate a fresh receiving identity — spend_key (spend
+/// authority) + an INDEPENDENT view_key (note discovery, rotatable without
+/// touching spend_key/owner_pubkey — B.13.1). Prints the public meta-address
+/// `(owner_pubkey, viewing_pubkey)` to hand to senders; writes the secrets
+/// (encrypted, same envelope as a note) to --out for later `opaq transfer
+/// --to/--to-view` and the eventual `opaq list-unspent` (P2.5.2).
+fn address(f: &HashMap<String, String>) -> R {
+    let out_path = req(f, "out")?;
+
+    let spend_key = random_scalar();
+    let owner_pubkey = poseidon_be(&[spend_key]); // hash_1 — same as every other note
+    let view_key = opaq_common::viewkey::ViewKey::generate();
+    let viewing_pubkey = view_key.viewing_pubkey();
+
+    let identity = serde_json::json!({
+        "spend_key": hex::encode(spend_key),
+        "view_key": hex::encode(view_key.to_bytes()),
+        "owner_pubkey": hex::encode(owner_pubkey),
+        "viewing_pubkey": hex::encode(viewing_pubkey),
+    });
+    write_note(out_path, &identity)?;
+
+    println!("identity written (encrypted) -> {out_path}");
+    println!("\nmeta-address (share this with senders):");
+    println!("  owner_pubkey   0x{}", hex::encode(owner_pubkey));
+    println!("  viewing_pubkey 0x{}", hex::encode(viewing_pubkey));
+    Ok(())
+}
 
 fn deposit(f: &HashMap<String, String>) -> R {
     let mint = pubkey(req(f, "token")?)?;
@@ -467,6 +497,23 @@ fn transfer(f: &HashMap<String, String>) -> R {
     if f.contains_key("prove") || f.contains_key("submit") {
         let out = f.get("out").map(String::as_str).unwrap_or("transfer.bin");
         prove_and_emit("transfer", &inputs, "{}", out, f)?; // sidecar unused for transfer
+
+        // OPAQ.md B.13.3/B.13.4: if the recipient shared a viewing_pubkey, encrypt
+        // out0's opening for them and append the memo to the instruction's own
+        // data. Not a circuit input, not parsed on-chain (the program only reads
+        // the fixed proof+public-input prefix) — purely a wallet-layer addition so
+        // B can later run `opaq list-unspent` without any out-of-band handoff.
+        if let Some(to_view) = f.get("to-view") {
+            let viewing_pubkey = hex32(to_view)?;
+            let opening = opaq_common::viewkey::NoteOpening {
+                token_id,
+                amount: out0_amt,
+                blinding_factor: out0_bl,
+            };
+            let n = attach_recipient_memo(out, &viewing_pubkey, &opening)?;
+            println!("  attached encrypted memo for recipient ({n} bytes)");
+        }
+
         println!("transfer instruction blob -> {out}");
         if f.contains_key("submit") {
             let sig = submit_transfer(out, f)?;
@@ -738,6 +785,25 @@ fn hex32(s: &str) -> Result<[u8; 32], String> {
         .ok_or_else(|| "expected 32-byte hex".into())
 }
 
+/// OPAQ.md B.13.3/B.13.4: encrypt `opening` for `viewing_pubkey` and append the
+/// wire-format memo to the instruction blob at `path` (already written by
+/// `prove_and_emit`). Returns the number of bytes appended. Pulled out of
+/// `transfer()` so the byte-level plumbing is independently testable — the
+/// crypto itself (`encrypt_for`/`try_decrypt`) is already covered in
+/// `crates/common::viewkey`'s own tests.
+fn attach_recipient_memo(
+    path: &str,
+    viewing_pubkey: &[u8; 32],
+    opening: &opaq_common::viewkey::NoteOpening,
+) -> Result<usize, String> {
+    let memo = opaq_common::viewkey::encrypt_for(viewing_pubkey, opening);
+    let memo_bytes = memo.to_bytes();
+    let mut blob = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    blob.extend_from_slice(&memo_bytes);
+    std::fs::write(path, &blob).map_err(|e| format!("write {path}: {e}"))?;
+    Ok(memo_bytes.len())
+}
+
 /// Accept a 32-byte pubkey as base58 (Solana) or 0x-hex.
 fn pubkey(s: &str) -> Result<[u8; 32], String> {
     if let Ok(b) = hex::decode(s.trim_start_matches("0x")) {
@@ -795,4 +861,42 @@ fn read_note(path: &str) -> Result<Value, String> {
         .decrypt(Nonce::from_slice(&nonce), ct.as_ref())
         .map_err(|_| "decrypt failed (wrong passphrase?)")?;
     serde_json::from_slice(&pt).map_err(|_| "decrypted note is not valid JSON".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opaq_common::viewkey::{try_decrypt, NoteOpening, ViewKey};
+
+    #[test]
+    fn attach_recipient_memo_appends_a_decryptable_wire_memo() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("opaq-test-blob-{}.bin", std::process::id()));
+        let fixed_prefix = vec![0xABu8; 416]; // stand-in for a real proof+publics blob
+        std::fs::write(&path, &fixed_prefix).unwrap();
+
+        let recipient = ViewKey::generate();
+        let opening = NoteOpening {
+            token_id: be32(1),
+            amount: be32(42),
+            blinding_factor: be32(999),
+        };
+        let n = attach_recipient_memo(path.to_str().unwrap(), &recipient.viewing_pubkey(), &opening)
+            .expect("attach memo");
+        assert_eq!(n, opaq_common::viewkey::Memo::LEN);
+
+        let blob = std::fs::read(&path).unwrap();
+        assert_eq!(blob.len(), 416 + opaq_common::viewkey::Memo::LEN);
+        assert_eq!(&blob[..416], fixed_prefix.as_slice(), "the original blob prefix must be untouched");
+
+        let memo_bytes: [u8; opaq_common::viewkey::Memo::LEN] =
+            blob[416..].try_into().unwrap();
+        let memo = opaq_common::viewkey::Memo::from_bytes(&memo_bytes);
+        let recovered = try_decrypt(&recipient, &memo).expect("recipient decrypts their own memo");
+        assert_eq!(recovered.amount, opening.amount);
+        assert_eq!(recovered.token_id, opening.token_id);
+        assert_eq!(recovered.blinding_factor, opening.blinding_factor);
+
+        std::fs::remove_file(&path).ok();
+    }
 }

@@ -582,11 +582,18 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> Progr
 /// commitments. NO vault movement: value stays in the pool (the circuit enforces
 /// Σin == Σout for a single private token_id), so amounts/token never appear.
 /// Accounts: [payer (signer,w), commitment_tree (w), nullifier_set (w), system_program]
-/// Args (416): proof_a(64) proof_b(128) proof_c(64) merkle_root(32)
+/// Args (>= 416): proof_a(64) proof_b(128) proof_c(64) merkle_root(32)
 ///             nullifier0(32) nullifier1(32) out_commitment0(32) out_commitment1(32)
+///             [+ optional trailing B.13 viewing-key memo bytes — the wallet layer's
+///             encrypted note-opening for a recipient output, riding along in this
+///             instruction's own data. Not a circuit input, not parsed on-chain: the
+///             program only ever reads the fixed prefix above and ignores anything
+///             appended after it, so the memo costs no extra verification or compute
+///             here — it's just present in the transaction for RPC clients to read.]
 #[inline(never)]
 fn transfer(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
-    if args.len() != 64 + 128 + 64 + 32 + 32 + 32 + 32 + 32 {
+    const FIXED_LEN: usize = 64 + 128 + 64 + 32 + 32 + 32 + 32 + 32;
+    if args.len() < FIXED_LEN {
         return Err(ProgramError::InvalidInstructionData);
     }
     let proof_a: [u8; 64] = args[0..64].try_into().unwrap();
