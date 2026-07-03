@@ -173,10 +173,18 @@ fn main() {
     );
     fs::write(circuits_dir.join("burn_values.json"), burn_sidecar).unwrap();
 
-    // --- xburn/Prover.toml (Phase 4, P4.0): symmetric cross-chain burn ---
+    // --- xburn/Prover.toml (Phase 4, P4.0/P4.1): symmetric cross-chain burn ---
     // Reuses the same source note/path as withdraw/burn above (leaf 0). The
     // destination note gets a fresh owner + blinding, same token_id/amount
-    // (B.12.2 conservation).
+    // (B.12.2 conservation). dest_chain defaults to burn's Ethereum-mainnet
+    // fixture but is independently overridable — an EVM-origin xburn destined
+    // for SOLANA (m19/P4.1) needs SOLANA_CHAIN_ID (101, programs/opaq/src/lib.rs),
+    // not Ethereum's.
+    let xburn_dest_chain = std::env::var("OPAQ_XBURN_DEST_CHAIN")
+        .ok()
+        .and_then(|s| s.parse::<u128>().ok())
+        .map(be32)
+        .unwrap_or(dest_chain);
     let dest_owner_pubkey = poseidon_be(&[be32(848_484_848)]);
     let dest_blinding = be32(272_727_272);
     let out_commitment = poseidon_be(&[token_id, amount, dest_owner_pubkey, dest_blinding]);
@@ -185,7 +193,7 @@ fn main() {
          token_id = \"{}\"\namount = \"{}\"\nsrc_spend_key = \"{}\"\nsrc_blinding = \"{}\"\n\
          src_merkle_path = [{}]\nsrc_merkle_path_indices = [{}]\n\
          dest_owner_pubkey = \"{}\"\ndest_blinding = \"{}\"\n",
-        field_hex(&merkle_root), field_hex(&nullifier), field_hex(&dest_chain), field_hex(&out_commitment),
+        field_hex(&merkle_root), field_hex(&nullifier), field_hex(&xburn_dest_chain), field_hex(&out_commitment),
         field_hex(&token_id), field_hex(&amount), field_hex(&spend_key), field_hex(&blinding),
         path_list, idx_list,
         field_hex(&dest_owner_pubkey), field_hex(&dest_blinding),
@@ -197,7 +205,7 @@ fn main() {
         &[
             ("src_merkle_root", field_hex(&merkle_root)),
             ("src_nullifier", field_hex(&nullifier)),
-            ("dest_chain", field_hex(&dest_chain)),
+            ("dest_chain", field_hex(&xburn_dest_chain)),
             ("out_commitment", field_hex(&out_commitment)),
             ("token_id", field_hex(&token_id)),
             ("amount", field_hex(&amount)),
@@ -221,7 +229,7 @@ fn main() {
         hex::encode(commitment),
         hex::encode(nullifier),
         hex::encode(merkle_root),
-        hex::encode(dest_chain),
+        hex::encode(xburn_dest_chain),
         hex::encode(out_commitment),
     );
     fs::write(circuits_dir.join("xburn_values.json"), xburn_sidecar).unwrap();

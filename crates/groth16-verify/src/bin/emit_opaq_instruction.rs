@@ -3,10 +3,13 @@
 //!   deposit  (tag 1): proof_a(64) proof_b(128) proof_c(64) mint(32) amount(8 LE) commitment(32)
 //!   withdraw (tag 2): proof… merkle_root(32) nullifier(32) mint(32) amount(8 LE) recipient(32)
 //!   transfer (tag 3): proof… merkle_root(32) nullifier0(32) nullifier1(32) commitment0(32) commitment1(32)
+//!   mint_from_xburn (tag 7, circuit "xburn"): proof… src_merkle_root(32) src_nullifier(32)
+//!             dest_chain(32) out_commitment(32)
 //!
-//! Usage: emit_opaq_instruction <deposit|withdraw|transfer> <proof_dir> <e2e_values.json> <out.bin>
-//! For transfer the sidecar arg is unused — the 5 public inputs ARE the args, read
-//! straight from proof_dir/public.json (guaranteed to match what was proven).
+//! Usage: emit_opaq_instruction <deposit|withdraw|transfer|xburn> <proof_dir> <e2e_values.json> <out.bin>
+//! For transfer/xburn the sidecar arg is unused — their public inputs ARE the
+//! args, read straight from proof_dir/public.json (guaranteed to match what
+//! was proven).
 
 use std::{fs, path::PathBuf};
 
@@ -36,6 +39,27 @@ fn main() {
         assert_eq!(public.len(), 5, "transfer expects 5 public inputs, got {}", public.len());
         let mut data = Vec::with_capacity(1 + 256 + 5 * 32);
         data.push(3u8);
+        data.extend_from_slice(&p.a);
+        data.extend_from_slice(&p.b);
+        data.extend_from_slice(&p.c);
+        for x in &public {
+            data.extend_from_slice(x);
+        }
+        fs::write(&out, &data).unwrap();
+        println!("wrote {} ({} bytes)", out.display(), data.len());
+        return;
+    }
+
+    // mint_from_xburn's args are exactly xburn.nr's 4 public inputs (B.12.2:
+    // src_merkle_root, src_nullifier, dest_chain, out_commitment) — same
+    // straight-from-public.json shape as transfer, tag 7 not 3.
+    if circuit == "xburn" {
+        let public_json: Value =
+            serde_json::from_str(&fs::read_to_string(proof_dir.join("public.json")).unwrap()).unwrap();
+        let public = public_from_json(&public_json);
+        assert_eq!(public.len(), 4, "xburn expects 4 public inputs, got {}", public.len());
+        let mut data = Vec::with_capacity(1 + 256 + 4 * 32);
+        data.push(7u8);
         data.extend_from_slice(&p.a);
         data.extend_from_slice(&p.b);
         data.extend_from_slice(&p.c);

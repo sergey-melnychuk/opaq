@@ -1167,16 +1167,26 @@ style pool speaking Opaq's note format:
   EVM-native assets; Solana-origin assets are fed purely by `mint_from_xburn`.
 
 **B.12.5 Solana side.**
-- **`xburn` instruction:** today's tag-4 `burn`, but the circuit's 4 public inputs
-  become `[merkle_root, nullifier, dest_chain, out_commitment]` (no token_id/amount/
-  dest_address in the clear). Regenerate `vk_burn`→`vk_xburn`; set `nr_pubinputs=4`.
-- **`mint_from_xburn` (NEW):** accounts `[payer(signer,w), commitment_tree(w),
-  pending_set(w), system]`; args = proof + `[src_root, src_nullifier,
-  dest_chain=SOLANA_ID, out_commitment]`. Verify Groth16 (`XBURN_VK`); require the
-  EVM `src_nullifier` is attested pending (operator-mirrored into a Solana
-  `pendingMint` PDA) and not minted; require `dest_chain == SOLANA_CHAIN_ID`;
-  `tree_insert(out_commitment)`; mark minted. Reuses the existing verifier +
-  `tree_insert` + a new pending/minted PDA mirroring OpaqMint's mappings.
+- **`xburn` instruction (source-side migration): DEFERRED, see P4.1's scoping
+  call in B.12.8.** Originally spec'd as today's tag-4 `burn` migrated in place
+  to the circuit's 4 public inputs `[merkle_root, nullifier, dest_chain,
+  out_commitment]` (no token_id/amount/dest_address in the clear;
+  `vk_burn`→`vk_xburn`, `nr_pubinputs=4`). Doing this before `OpaqPool.sol`
+  (P4.2) exists would break the already-shipped Phase 3 forward bridge
+  (m14-m18, `OpaqMint.sol`) for no working replacement — deferred until P4.2/
+  P4.3 land, per B.12.7's migration note.
+- **`mint_from_xburn`: DONE (P4.1, e2e m19).** Implemented as new instructions
+  (tag 5 `initialize_xburn_pending`, tag 6 `add_pending_xburn`, tag 7
+  `mint_from_xburn`) rather than folding into tag 4, so it ships without
+  touching anything already working. Accounts `[payer(signer,w),
+  commitment_tree(w), xburn_pending(w), system]`; args = proof + `[src_root,
+  src_nullifier, dest_chain, out_commitment]`. Verifies Groth16 (`XBURN_VK`);
+  requires `dest_chain == SOLANA_CHAIN_ID` (checked before the proof, so a
+  wrong-chain submission never reaches Groth16 verification); requires
+  `src_nullifier` attested pending (operator-mirrored into the `XburnPending`
+  PDA via `add_pending_xburn`) and not yet minted; `tree_insert(out_commitment)`;
+  marks minted. Reuses the existing verifier + `tree_insert`; `XburnPending`
+  mirrors `OpaqMint.sol`'s `pendingMint`/`minted` maps (B.12.4).
 
 **B.12.6 Attestation & trust (A.9, shared, direction-agnostic).** Each direction
 mirrors the source's finalized nullifier into the destination's `pending` set via
@@ -1192,12 +1202,34 @@ forward path's EVM mint changes from "credit balanceOf" to "insert out_commitmen
 tree insert + a spendable EVM note instead of a balance.
 
 **B.12.8 Build phases (each a commit + milestone, like P2/P3).**
-- **P4.0 — `xburn.nr`** + `gen_witness` fixture + Groth16 prove/verify off-chain
-  (mirror P2.0/P3.0). *Accept:* proof verifies; 4 public inputs; value conserved +
-  amount range-checked; a tampered `out_commitment`/`token_id`/`amount` fails.
-- **P4.1 — Solana `mint_from_xburn`** + `xburn` migration + `vk_xburn`; e2e **m19**:
-  an EVM-origin xburn proof (fixture) mints a note on Solana; double-mint, wrong
-  `dest_chain`, and unattested nullifier all rejected.
+- **[x] P4.0 — `xburn.nr`** + `gen_witness` fixture + Groth16 prove/verify off-chain
+  (mirror P2.0/P3.0). *Accept:* proof verifies (29,476 R1CS constraints, ptau
+  power 16); 4 public inputs; value conserved + amount range-checked; a
+  tampered `out_commitment` fails the circuit's binding constraint.
+- **[x] P4.1 — Solana `mint_from_xburn`** + `vk_xburn`; e2e **m19**
+  (`scripts/m19-mint-from-xburn.sh`): an EVM-origin xburn proof (fixture)
+  mints a note on Solana; double-mint, wrong `dest_chain`, and unattested
+  nullifier all rejected.
+
+  **Scoping call (deviates from this bullet's original "`xburn` migration"
+  wording):** implemented `mint_from_xburn` as brand-new instructions (tag 5
+  `initialize_xburn_pending`, tag 6 `add_pending_xburn`, tag 7
+  `mint_from_xburn`) rather than repurposing tag 4's `burn` in place. Migrating
+  tag 4 to xburn.nr's 4-public-input layout would immediately break Phase 3's
+  already-shipped, already-tested forward bridge (m14-m18, `OpaqMint.sol`)
+  before P4.2 (`OpaqPool.sol`) exists to replace what tag 4 currently feeds —
+  i.e. it would leave the repo in a working-forward/broken-nothing-yet state
+  turned into a broken-forward/nothing-working-yet state for the length of
+  P4.2's build. Purely additive avoids that gap; retiring tag 4 stays exactly
+  where B.12.7 already put it — after P4.2/P4.3 land and m15/17/18 are
+  rewritten against `OpaqPool.sol`, not before. New state: `XburnPending` PDA
+  (seed `xpending`) mirrors `OpaqMint.sol`'s `pendingMint`/`minted` maps —
+  zero-copy `operator[32] | count:u64 | (nullifier[32] ‖ minted:u8)*`, same
+  append-only/linear-scan/realloc shape as `NullifierSet` (B.2). `SOLANA_CHAIN_ID
+  = 101` is an Opaq-internal convention (Solana has no EIP-155 chain id) that
+  `xburn.nr`'s `dest_chain` public input must match when Solana is the
+  destination; `gen_witness`'s xburn fixture takes `OPAQ_XBURN_DEST_CHAIN` to
+  target it independently of burn's Ethereum-mainnet fixture default.
 - **P4.2 — `OpaqPool.sol`** (Poseidon Merkle + nullifiers + xburn + mint_from_xburn)
   with an M0-style Poseidon parity gate (EVM == circuit == Solana); Foundry tests.
 - **P4.3 — round-trip both ways, e2e m20:** Solana note → EVM note (forward,

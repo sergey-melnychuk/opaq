@@ -28,6 +28,7 @@ mod vk_burn;
 mod vk_deposit;
 mod vk_transfer;
 mod vk_withdraw;
+mod vk_xburn;
 use tree_consts::{EMPTY_ROOT, ZEROS};
 
 pub const TREE_DEPTH: usize = 24;
@@ -36,6 +37,13 @@ pub const ROOT_HISTORY: usize = 32;
 pub const TREE_SEED: &[u8] = b"tree";
 pub const NULLIFIER_SEED: &[u8] = b"nullifiers";
 pub const VAULT_SEED: &[u8] = b"vault"; // vault token-account authority PDA
+pub const XBURN_PENDING_SEED: &[u8] = b"xpending"; // B.12.5 mint_from_xburn attestation PDA
+
+/// Opaq-internal destination-chain id for Solana (OPAQ.md B.12.5) — this is
+/// NOT an external standard (Solana has no EIP-155-style numeric chain id);
+/// it only has to agree with what a source chain's `xburn` proof binds as
+/// `dest_chain` when Solana is the destination.
+pub const SOLANA_CHAIN_ID: u64 = 101;
 
 // Custom error codes (ProgramError::Custom).
 pub const E_PROOF_INVALID: u32 = 1;
@@ -45,6 +53,9 @@ pub const E_UNKNOWN_ROOT: u32 = 4;
 pub const E_WRONG_VAULT: u32 = 5;
 pub const E_WRONG_RECIPIENT: u32 = 6;
 pub const E_WRONG_MINT: u32 = 7;
+pub const E_WRONG_OPERATOR: u32 = 8; // add_pending_xburn signer != XburnPending.operator
+pub const E_NOT_PENDING: u32 = 9; // mint_from_xburn: nullifier never attested (or already minted)
+pub const E_WRONG_CHAIN: u32 = 10; // mint_from_xburn: proof's dest_chain != SOLANA_CHAIN_ID
 
 /// SPL Token program id (`Tokenkeg…`). Funds only ever move via a CPI to THIS
 /// program, so it must be validated: otherwise a no-op/forged "token program"
@@ -110,6 +121,17 @@ const BURN_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     vk_gamme_g2: vk_burn::VK_GAMME_G2,
     vk_delta_g2: vk_burn::VK_DELTA_G2,
     vk_ic: &vk_burn::VK_IC,
+};
+
+/// Phase 4 (B.12.2/B.12.5): xburn.nr's verifier — used by `mint_from_xburn`
+/// when Solana is the DESTINATION of a cross-chain shielded move.
+const XBURN_VK: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
+    nr_pubinputs: 4, // src_merkle_root, src_nullifier, dest_chain, out_commitment
+    vk_alpha_g1: vk_xburn::VK_ALPHA_G1,
+    vk_beta_g2: vk_xburn::VK_BETA_G2,
+    vk_gamme_g2: vk_xburn::VK_GAMME_G2,
+    vk_delta_g2: vk_xburn::VK_DELTA_G2,
+    vk_ic: &vk_xburn::VK_IC,
 };
 
 /// Original Poseidon hash of two field elements (== the circuit's hash_2 and
@@ -251,6 +273,66 @@ impl NullifierSet {
     pub const INIT_SIZE: usize = 8 + 4;
 }
 
+// XburnPending (B.12.5): mirrors OpaqMint.sol's pendingMint/minted mappings on
+// the Solana side. Zero-copy layout: operator[32] | count u64 LE [32..40] |
+// entries (nullifier[32] ‖ minted:u8) repeated from 40. Same append-only,
+// linear-scan, realloc-grown shape as NullifierSet (B.2) — appropriate for the
+// same reason (few entries relative to mainnet nullifier-set scale, A.10).
+const XP_OFF_OPERATOR: usize = 0;
+const XP_OFF_COUNT: usize = 32;
+const XP_OFF_ENTRIES: usize = 40;
+const XP_ENTRY_SIZE: usize = 33; // nullifier(32) + minted(1)
+const XBURN_PENDING_INIT_SIZE: usize = XP_OFF_ENTRIES;
+
+fn xpending_operator(data: &[u8]) -> Pubkey {
+    Pubkey::new_from_array(data[XP_OFF_OPERATOR..XP_OFF_OPERATOR + 32].try_into().unwrap())
+}
+
+fn xpending_count(data: &[u8]) -> u64 {
+    u64::from_le_bytes(data[XP_OFF_COUNT..XP_OFF_COUNT + 8].try_into().unwrap())
+}
+
+/// Byte offset of `nullifier`'s entry, if present.
+fn xpending_find(data: &[u8], nullifier: &[u8; 32]) -> Option<usize> {
+    let count = xpending_count(data) as usize;
+    (0..count).map(|i| XP_OFF_ENTRIES + i * XP_ENTRY_SIZE).find(|&off| &data[off..off + 32] == nullifier)
+}
+
+/// Append a fresh pending entry (minted=false). Caller must have already
+/// checked `xpending_find` returns `None` — this never dedupes itself.
+fn xpending_append<'a>(
+    payer: &AccountInfo<'a>,
+    xp: &AccountInfo<'a>,
+    system: &AccountInfo<'a>,
+    nullifier: [u8; 32],
+) -> ProgramResult {
+    let count = xpending_count(&xp.data.borrow());
+    let new_len = XP_OFF_ENTRIES + (count as usize + 1) * XP_ENTRY_SIZE;
+
+    let needed = Rent::get()?.minimum_balance(new_len);
+    let have = xp.lamports();
+    if needed > have {
+        let mut d = Vec::with_capacity(12);
+        d.extend_from_slice(&2u32.to_le_bytes()); // SystemInstruction::Transfer
+        d.extend_from_slice(&(needed - have).to_le_bytes());
+        let ix = Instruction {
+            program_id: Pubkey::default(),
+            accounts: vec![AccountMeta::new(*payer.key, true), AccountMeta::new(*xp.key, false)],
+            data: d,
+        };
+        invoke(&ix, &[payer.clone(), xp.clone(), system.clone()])?;
+    }
+    xp.resize(new_len)?;
+
+    let mut data = xp.data.borrow_mut();
+    let off = XP_OFF_ENTRIES + count as usize * XP_ENTRY_SIZE;
+    data[off..off + 32].copy_from_slice(&nullifier);
+    data[off + 32] = 0; // minted = false
+    let count2 = count + 1;
+    data[XP_OFF_COUNT..XP_OFF_COUNT + 8].copy_from_slice(&count2.to_le_bytes());
+    Ok(())
+}
+
 entrypoint!(process_instruction);
 
 pub fn process_instruction(
@@ -265,6 +347,9 @@ pub fn process_instruction(
         3 => transfer(program_id, accounts, args),
         4 => burn(program_id, accounts, args),
         2 => withdraw(program_id, accounts, args),
+        5 => initialize_xburn_pending(program_id, accounts, args),
+        6 => add_pending_xburn(program_id, accounts, args),
+        7 => mint_from_xburn(program_id, accounts, args),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -726,4 +811,142 @@ fn burn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramRe
 /// Low 32 bits of a 32-byte field — the EVM chain id for typical ids (cheap log).
 fn chain_lo(b: &[u8; 32]) -> u32 {
     u32::from_be_bytes(b[28..32].try_into().unwrap())
+}
+
+/// Phase 4 (B.12.5): one-time setup for the `XburnPending` PDA — the Solana
+/// mirror of OpaqMint.sol's `pendingMint`/`minted` mappings, used when Solana
+/// is the DESTINATION of a cross-chain shielded move. `operator` is the
+/// semi-trusted attestor (A.9 rung 1: single key today; the same slot an ICP
+/// canister's threshold-signing address takes at rung 2+).
+/// Accounts: [payer (signer,w), xburn_pending (w), system_program]
+/// Args (32): operator (Pubkey)
+fn initialize_xburn_pending(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
+    if args.len() != 32 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let operator = Pubkey::new_from_array(args[0..32].try_into().unwrap());
+
+    let iter = &mut accounts.iter();
+    let payer = next_account_info(iter)?;
+    let xp_ai = next_account_info(iter)?;
+    let system = next_account_info(iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let (xp_pda, xp_bump) = Pubkey::find_program_address(&[XBURN_PENDING_SEED], program_id);
+    if xp_ai.key != &xp_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    create_pda(payer, xp_ai, system, program_id, XBURN_PENDING_SEED, xp_bump, XBURN_PENDING_INIT_SIZE)?;
+    let mut data = xp_ai.data.borrow_mut();
+    data[XP_OFF_OPERATOR..XP_OFF_OPERATOR + 32].copy_from_slice(operator.as_ref());
+    data[XP_OFF_COUNT..XP_OFF_COUNT + 8].copy_from_slice(&0u64.to_le_bytes());
+
+    msg!("opaq: xburn_pending initialized, operator={}", operator);
+    Ok(())
+}
+
+/// Phase 4 (B.12.5): the operator mirrors a finalized SOURCE-chain `xburn` by
+/// attesting its nullifier here — the ONLY trust in the bridge (A.9): the
+/// operator posts a boolean, never sees a secret (the proof itself binds the
+/// nullifier to token/amount/destination note).
+/// Accounts: [operator (signer,w, also funds rent), xburn_pending (w), system_program]
+/// Args (32): src_nullifier
+fn add_pending_xburn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
+    if args.len() != 32 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let src_nullifier: [u8; 32] = args[0..32].try_into().unwrap();
+
+    let iter = &mut accounts.iter();
+    let operator = next_account_info(iter)?;
+    let xp_ai = next_account_info(iter)?;
+    let system = next_account_info(iter)?;
+
+    if !operator.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let (xp_pda, _) = Pubkey::find_program_address(&[XBURN_PENDING_SEED], program_id);
+    if xp_ai.key != &xp_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    if xpending_operator(&xp_ai.data.borrow()) != *operator.key {
+        return Err(ProgramError::Custom(E_WRONG_OPERATOR));
+    }
+    if xpending_find(&xp_ai.data.borrow(), &src_nullifier).is_some() {
+        // Already pending (or already minted, per B.12.4's "re-add-after-mint
+        // guard") — reject rather than silently accept a duplicate attestation.
+        return Err(ProgramError::Custom(E_ALREADY_SPENT));
+    }
+    xpending_append(operator, xp_ai, system, src_nullifier)?;
+
+    msg!("opaq: xburn pending added");
+    Ok(())
+}
+
+/// Phase 4 (B.12.5): the DESTINATION-side mint — verify the SAME proof the
+/// source chain's `xburn` verified, require the operator has attested
+/// `src_nullifier` as a finalized (unminted) source burn, then re-shield by
+/// inserting `out_commitment` into Solana's own tree. Solana never validates
+/// `src_root` — it isn't Solana's root to check (B.12.3): the source chain
+/// already enforced a valid root before recording its own nullifier.
+/// Accounts: [payer (signer,w), commitment_tree (w), xburn_pending (w), system_program]
+/// Args (256 + 4*32 = 384): proof_a(64) proof_b(128) proof_c(64)
+///             src_merkle_root(32) src_nullifier(32) dest_chain(32) out_commitment(32)
+#[inline(never)]
+fn mint_from_xburn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
+    if args.len() != 64 + 128 + 64 + 32 + 32 + 32 + 32 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let proof_a: [u8; 64] = args[0..64].try_into().unwrap();
+    let proof_b: [u8; 128] = args[64..192].try_into().unwrap();
+    let proof_c: [u8; 64] = args[192..256].try_into().unwrap();
+    let src_merkle_root: [u8; 32] = args[256..288].try_into().unwrap();
+    let src_nullifier: [u8; 32] = args[288..320].try_into().unwrap();
+    let dest_chain: [u8; 32] = args[320..352].try_into().unwrap();
+    let out_commitment: [u8; 32] = args[352..384].try_into().unwrap();
+
+    if dest_chain != be32(SOLANA_CHAIN_ID) {
+        return Err(ProgramError::Custom(E_WRONG_CHAIN));
+    }
+
+    // Public inputs in circuit order (xburn.nr, B.12.2).
+    let public = [src_merkle_root, src_nullifier, dest_chain, out_commitment];
+    let mut verifier = Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public, &XBURN_VK)
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+    verifier
+        .verify()
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+
+    let iter = &mut accounts.iter();
+    let payer = next_account_info(iter)?;
+    let tree_ai = next_account_info(iter)?;
+    let xp_ai = next_account_info(iter)?;
+    let _system = next_account_info(iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
+    let (xp_pda, _) = Pubkey::find_program_address(&[XBURN_PENDING_SEED], program_id);
+    if tree_ai.key != &tree_pda || xp_ai.key != &xp_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    let mint_offset = {
+        let data = xp_ai.data.borrow();
+        let off = xpending_find(&data, &src_nullifier).ok_or(ProgramError::Custom(E_NOT_PENDING))?;
+        if data[off + 32] != 0 {
+            return Err(ProgramError::Custom(E_ALREADY_SPENT)); // already minted
+        }
+        off
+    };
+
+    let leaf_index = tree_insert(&mut tree_ai.data.borrow_mut(), out_commitment)?;
+    xp_ai.data.borrow_mut()[mint_offset + 32] = 1; // mark minted
+
+    msg!("opaq: mint_from_xburn ok, leaf={}", leaf_index);
+    Ok(())
 }
