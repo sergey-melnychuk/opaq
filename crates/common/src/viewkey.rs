@@ -61,8 +61,16 @@ impl ViewKey {
 /// The note-opening payload a sender encrypts for a transfer output's owner:
 /// everything needed to reconstruct the commitment (with the recipient's own
 /// `owner_pubkey`) and, with `spend_key`, the nullifier (B.13.3 step 4).
+///
+/// Carries the RAW `mint` pubkey, not `token_id = to_field(mint)` (B.4.2).
+/// `to_field` is a one-way Poseidon hash — if only the field-encoded form were
+/// sent, a recipient could recompute the commitment (both forms agree there)
+/// but could never learn which SPL mint the note is actually denominated in,
+/// making the note undiscoverable-but-unspendable. `mint` is what every other
+/// note file already stores; the recipient re-derives `to_field(mint)` locally
+/// exactly like `deposit`/`transfer` do.
 pub struct NoteOpening {
-    pub token_id: [u8; 32],
+    pub mint: [u8; 32],
     pub amount: [u8; 32],
     pub blinding_factor: [u8; 32],
 }
@@ -70,7 +78,7 @@ pub struct NoteOpening {
 impl NoteOpening {
     fn to_bytes(&self) -> [u8; 96] {
         let mut out = [0u8; 96];
-        out[0..32].copy_from_slice(&self.token_id);
+        out[0..32].copy_from_slice(&self.mint);
         out[32..64].copy_from_slice(&self.amount);
         out[64..96].copy_from_slice(&self.blinding_factor);
         out
@@ -78,7 +86,7 @@ impl NoteOpening {
 
     fn from_bytes(b: &[u8; 96]) -> Self {
         Self {
-            token_id: b[0..32].try_into().unwrap(),
+            mint: b[0..32].try_into().unwrap(),
             amount: b[32..64].try_into().unwrap(),
             blinding_factor: b[64..96].try_into().unwrap(),
         }
@@ -156,7 +164,7 @@ mod tests {
     use crate::{be32, poseidon_be};
 
     fn opening(seed: u128) -> NoteOpening {
-        NoteOpening { token_id: be32(seed), amount: be32(seed + 1), blinding_factor: be32(seed + 2) }
+        NoteOpening { mint: be32(seed), amount: be32(seed + 1), blinding_factor: be32(seed + 2) }
     }
 
     #[test]
@@ -167,7 +175,7 @@ mod tests {
         let memo = encrypt_for(&recipient.viewing_pubkey(), &opening_in);
         let opening_out = try_decrypt(&recipient, &memo).expect("decrypts for the intended recipient");
 
-        assert_eq!(opening_out.token_id, opening_in.token_id);
+        assert_eq!(opening_out.mint, opening_in.mint);
         assert_eq!(opening_out.amount, opening_in.amount);
         assert_eq!(opening_out.blinding_factor, opening_in.blinding_factor);
     }

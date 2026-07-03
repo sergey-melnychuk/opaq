@@ -35,7 +35,8 @@ fn main() {
         Some("transfer") => transfer(&flags(&args[2..])),
         Some("burn") => burn(&flags(&args[2..])),
         Some("address") => address(&flags(&args[2..])),
-        _ => Err("usage: opaq <deposit|withdraw|transfer|burn|address> ...".into()),
+        Some("list-unspent") => list_unspent(&flags(&args[2..])),
+        _ => Err("usage: opaq <deposit|withdraw|transfer|burn|address|list-unspent> ...".into()),
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
@@ -71,6 +72,94 @@ fn address(f: &HashMap<String, String>) -> R {
     println!("\nmeta-address (share this with senders):");
     println!("  owner_pubkey   0x{}", hex::encode(owner_pubkey));
     println!("  viewing_pubkey 0x{}", hex::encode(viewing_pubkey));
+    Ok(())
+}
+
+/// OPAQ.md B.13.5: scan every transfer this pool has ever seen for a memo
+/// this identity's `view_key` can decrypt, verify the recovered opening
+/// actually reproduces the transaction's logged `out_commitment0` (defends
+/// against a malformed/misdirected memo), then check the note's nullifier
+/// against the live on-chain set to skip anything already spent. Each
+/// surviving note is written out as a standard (encrypted) note file — the
+/// same format `deposit`/`transfer` already produce — so `opaq withdraw
+/// --note <file> --rpc ... --program ...` works on it unmodified; leaf_index
+/// is left null since withdraw already re-harvests + reconstructs the path
+/// fresh against current pool state.
+fn list_unspent(f: &HashMap<String, String>) -> R {
+    let identity = read_note(req(f, "identity")?)?;
+    let spend_key = hex32(identity["spend_key"].as_str().ok_or("identity missing spend_key")?)?;
+    let view_key_bytes = hex32(identity["view_key"].as_str().ok_or("identity missing view_key")?)?;
+    let view_key = opaq_common::viewkey::ViewKey::from_bytes(view_key_bytes);
+    let owner_pubkey = poseidon_be(&[spend_key]);
+
+    let rpc = req(f, "rpc")?;
+    let program = req(f, "program")?;
+    let out_dir = f.get("out-dir").map(String::as_str).unwrap_or(".");
+
+    let script = std::env::var("OPAQ_LIST_UNSPENT_SCRIPT")
+        .unwrap_or_else(|_| "tests/list_unspent.mjs".to_string());
+    let cmd = std::process::Command::new("node")
+        .args([&script, rpc, program])
+        .output()
+        .map_err(|e| format!("spawn node {script}: {e} (is node installed / cwd repo root?)"))?;
+    if !cmd.status.success() {
+        return Err(format!("list_unspent read path failed: {}", String::from_utf8_lossy(&cmd.stderr).trim()));
+    }
+    let v: Value = serde_json::from_slice(&cmd.stdout).map_err(|_| "list_unspent output is not valid JSON")?;
+
+    let nullifiers: std::collections::HashSet<[u8; 32]> = v["nullifiers"]
+        .as_array()
+        .ok_or("missing nullifiers")?
+        .iter()
+        .map(|x| hex32(x.as_str().unwrap()))
+        .collect::<Result<_, _>>()?;
+    let memos = v["memos"].as_array().ok_or("missing memos")?;
+
+    println!("scanning {} transfer memo(s) …", memos.len());
+    let mut found = 0usize;
+    for m in memos {
+        let commitment_expected = hex32(m["commitment"].as_str().ok_or("memo entry missing commitment")?)?;
+        let memo_bytes_vec =
+            hex::decode(m["memo"].as_str().ok_or("memo entry missing memo")?).map_err(|_| "bad memo hex")?;
+        let memo_bytes: [u8; opaq_common::viewkey::Memo::LEN] = match memo_bytes_vec.try_into() {
+            Ok(b) => b,
+            Err(_) => continue, // not our wire format (or corrupt) — skip
+        };
+        let memo = opaq_common::viewkey::Memo::from_bytes(&memo_bytes);
+
+        let Some(opening) = opaq_common::viewkey::try_decrypt(&view_key, &memo) else {
+            continue; // not ours
+        };
+
+        let token_id = to_field_be(&opening.mint);
+        let commitment = poseidon_be(&[token_id, opening.amount, owner_pubkey, opening.blinding_factor]);
+        if commitment != commitment_expected {
+            eprintln!("  warning: a memo decrypted but its commitment didn't match — skipping (malformed?)");
+            continue;
+        }
+
+        let nullifier = poseidon_be(&[commitment, spend_key]);
+        if nullifiers.contains(&nullifier) {
+            continue; // already spent
+        }
+
+        let amount_u64 = u64::from_be_bytes(opening.amount[24..32].try_into().unwrap());
+        let note = serde_json::json!({
+            "mint": hex::encode(opening.mint),
+            "amount": amount_u64,
+            "spend_key": hex::encode(spend_key),
+            "blinding": hex::encode(opening.blinding_factor),
+            "owner_pubkey": hex::encode(owner_pubkey),
+            "commitment": hex::encode(commitment),
+            "leaf_index": Value::Null,
+        });
+        let note_path = format!("{out_dir}/note-{}.json", &hex::encode(commitment)[..16]);
+        write_note(&note_path, &note)?;
+        println!("  found unspent note: {amount_u64} of mint {} -> {note_path}", hex::encode(opening.mint));
+        found += 1;
+    }
+
+    println!("done: {found} unspent note(s) discovered -> {out_dir}/");
     Ok(())
 }
 
@@ -506,7 +595,7 @@ fn transfer(f: &HashMap<String, String>) -> R {
         if let Some(to_view) = f.get("to-view") {
             let viewing_pubkey = hex32(to_view)?;
             let opening = opaq_common::viewkey::NoteOpening {
-                token_id,
+                mint, // raw mint, not token_id=to_field(mint) — see NoteOpening's doc comment
                 amount: out0_amt,
                 blinding_factor: out0_bl,
             };
@@ -877,7 +966,7 @@ mod tests {
 
         let recipient = ViewKey::generate();
         let opening = NoteOpening {
-            token_id: be32(1),
+            mint: be32(1),
             amount: be32(42),
             blinding_factor: be32(999),
         };
@@ -894,7 +983,7 @@ mod tests {
         let memo = opaq_common::viewkey::Memo::from_bytes(&memo_bytes);
         let recovered = try_decrypt(&recipient, &memo).expect("recipient decrypts their own memo");
         assert_eq!(recovered.amount, opening.amount);
-        assert_eq!(recovered.token_id, opening.token_id);
+        assert_eq!(recovered.mint, opening.mint);
         assert_eq!(recovered.blinding_factor, opening.blinding_factor);
 
         std::fs::remove_file(&path).ok();

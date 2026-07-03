@@ -1263,9 +1263,16 @@ additionally:
 2. `shared_secret = X25519(esk, B.viewing_pubkey)`.
 3. `sym_key = KDF(shared_secret)` (BLAKE3, keyed/derive_key mode — no new
    dependency family beyond what a KDF needs).
-4. `plaintext = token_id ‖ amount ‖ blinding_factor` (3 × 32-byte BE field
-   encodings = 96 bytes — everything needed to reconstruct the commitment and,
-   with `spend_key`, the nullifier).
+4. `plaintext = mint ‖ amount ‖ blinding_factor` (3 × 32-byte BE encodings =
+   96 bytes). **`mint` is the raw SPL mint, not `token_id = to_field(mint)`**
+   (B.4.2) — `to_field` is a one-way Poseidon hash, so sending only the
+   field-encoded form would let the recipient recompute the commitment (both
+   forms agree there) but never recover *which* mint the note is denominated
+   in, making it undiscoverable-but-unspendable. `mint` is what every note
+   file already stores; the recipient re-derives `to_field(mint)` locally,
+   same as `deposit`/`transfer` already do. (Caught after the first pass at
+   this spec shipped code with `token_id` instead — fixed before `list-unspent`
+   was built on top of it.)
 5. `ciphertext = ChaCha20Poly1305(sym_key, nonce, plaintext)` — reuses the
    same AEAD already used for note-at-rest encryption (B.7), just keyed via
    ECDH instead of a passphrase.
@@ -1334,10 +1341,30 @@ built, not part of this section's scope.
   decrypts the appended tail back to the exact opening). On-chain, `transfer`'s
   length check relaxed from `args.len() != FIXED_LEN` to `args.len() <
   FIXED_LEN` so the trailing memo doesn't get rejected — the program still
-  never parses it, per B.13.4. **Not yet run against a live validator.**
-- **P2.5.2** — `opaq list-unspent` (recipient scan per B.13.5), plus a note
-  store so discovered notes persist locally like self-created ones.
-- **Accept:** A sends a transfer to B's meta-address; B, holding only
-  `(spend_key, view_key)` and zero out-of-band info, runs `opaq list-unspent`
-  and recovers the note, then withdraws it — e2e on a validator. (P2.5.0/1 are
-  verified at the unit level; this full e2e accept criterion lands with P2.5.2.)
+  never parses it, per B.13.4.
+
+  Two bugs caught before P2.5.2 built on top of this: (1) `NoteOpening` was
+  carrying `token_id = to_field(mint)` instead of the raw `mint` — a one-way
+  hash a recipient could never invert back into "which SPL mint is this",
+  making a discovered note unspendable (fixed, see B.13.3's note). (2) the
+  zero-infra read path's transfer-commitment extraction sliced
+  `raw.length - 64`/`raw.length - 32` — correct only when a transfer carries
+  no memo; the moment one does, `raw.length` grows and those offsets slice
+  into memo bytes instead of the commitments. Fixed to slice from the FIXED
+  absolute offsets (353/385) and to accept `raw.length >= 417` instead of
+  `=== 417` (`tests/read_path.mjs`).
+- **[x] P2.5.2** — `opaq list-unspent --identity <file> --rpc --program
+  --out-dir <dir>`: fetches every transfer memo + the live nullifier set
+  purely over RPC (`tests/list_unspent.mjs`, zero-infra per A.8), trial-
+  decrypts each with `view_key`, re-verifies the recovered opening against
+  the transaction's logged `out_commitment0` (rejects a malformed/misdirected
+  memo), skips anything already spent, and writes each surviving note as a
+  standard (encrypted) note file `opaq withdraw` reads unmodified.
+- **[x] Accept — verified on a validator (M21, `scripts/m21-view-key-
+  discovery.sh` / `tests/m21_view_key_discovery.mjs`):** Alice deposits,
+  generates nothing for Bob ahead of time; Bob runs `opaq address` and
+  publishes his meta-address; Alice `opaq transfer --to-view`s to it; Bob,
+  holding ONLY his identity file (`spend_key`, `view_key`) and zero
+  out-of-band info, runs `opaq list-unspent`, discovers exactly the one note
+  sent to him, and withdraws it — funds land, vault balance matches. B.11
+  item #4 is closed.

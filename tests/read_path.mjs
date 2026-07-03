@@ -64,11 +64,24 @@ async function allSignatures(conn, address) {
   return out.reverse(); // chronological
 }
 
+// Fixed byte offsets inside a transfer instruction's own data (tag=3):
+//   tag(1) proof_a(64) proof_b(128) proof_c(64) merkle_root(32)
+//   nullifier0(32) nullifier1(32) out_commitment0(32) out_commitment1(32)
+// = 417 bytes fixed prefix. OPAQ.md B.13.4: a transfer MAY carry a trailing,
+// optional encrypted memo after this prefix (opaq transfer --to-view), so
+// callers must match on `raw.length >= 417`, NOT `=== 417`, and slice
+// commitments from these FIXED absolute offsets — never from `raw.length`,
+// which shifts once a memo is attached.
+const TRANSFER_FIXED_LEN = 417;
+const OFF_OUT_COMMITMENT0 = 353;
+const OFF_OUT_COMMITMENT1 = 385;
+
 // Pull the (leaf_index -> commitment) pairs out of one transaction. Two kinds of
 // opaq instruction insert leaves: a deposit (`tag=1`, 329 bytes, final 32 = the
-// commitment, logs `deposit ok, leaf_index=N`) and a transfer (`tag=3`, 417 bytes,
-// final 64 = the 2 output commitments, logs `transfer ok, leaves=N,M`). Both must
-// be harvested or notes created by a transfer (e.g. change) can't be withdrawn.
+// commitment, logs `deposit ok, leaf_index=N`) and a transfer (`tag=3`, >= 417
+// bytes, out_commitment0/1 at fixed offsets, logs `transfer ok, leaves=N,M`).
+// Both must be harvested or notes created by a transfer (e.g. change) can't be
+// withdrawn.
 function depositsFromTx(tx, programId) {
   if (!tx || tx.meta?.err) return [];
   const msg = tx.transaction.message;
@@ -83,9 +96,9 @@ function depositsFromTx(tx, programId) {
     const raw = typeof ix.data === "string" ? Buffer.from(bs58.decode(ix.data)) : Buffer.from(ix.data);
     if (raw.length === 329 && raw[0] === 1) {
       commitments.push(hex(raw.subarray(raw.length - 32)));
-    } else if (raw.length === 417 && raw[0] === 3) {
-      commitments.push(hex(raw.subarray(raw.length - 64, raw.length - 32))); // out_commitment0
-      commitments.push(hex(raw.subarray(raw.length - 32))); // out_commitment1
+    } else if (raw.length >= TRANSFER_FIXED_LEN && raw[0] === 3) {
+      commitments.push(hex(raw.subarray(OFF_OUT_COMMITMENT0, OFF_OUT_COMMITMENT0 + 32))); // out_commitment0
+      commitments.push(hex(raw.subarray(OFF_OUT_COMMITMENT1, OFF_OUT_COMMITMENT1 + 32))); // out_commitment1
     }
   }
   if (commitments.length === 0) return [];
@@ -102,6 +115,63 @@ function depositsFromTx(tx, programId) {
     leafIndex: indices[i],
     commitment,
   }));
+}
+
+// B.13.5: pull out0's trailing memo (if any) from a transfer instruction —
+// the encrypted note-opening a sender may attach for out_commitment0's owner
+// (`opaq transfer --to-view`). out1 (change-to-self) never carries one.
+function transferMemoFromTx(tx, programId) {
+  if (!tx || tx.meta?.err) return [];
+  const msg = tx.transaction.message;
+  const keys = msg.accountKeys ?? msg.staticAccountKeys;
+  const pid = programId.toBase58();
+
+  const out = [];
+  for (const ix of msg.instructions ?? msg.compiledInstructions ?? []) {
+    const owner = keys[ix.programIdIndex];
+    if ((owner.toBase58 ? owner.toBase58() : owner.pubkey?.toBase58()) !== pid) continue;
+    const raw = typeof ix.data === "string" ? Buffer.from(bs58.decode(ix.data)) : Buffer.from(ix.data);
+    if (raw.length > TRANSFER_FIXED_LEN && raw[0] === 3) {
+      out.push({
+        commitment: hex(raw.subarray(OFF_OUT_COMMITMENT0, OFF_OUT_COMMITMENT0 + 32)),
+        memo: hex(raw.subarray(TRANSFER_FIXED_LEN)),
+      });
+    }
+  }
+  return out;
+}
+
+// The full set of (out_commitment0 -> memo) pairs across every transfer that
+// ever carried one, harvested purely over RPC (same walk as fetchLeaves).
+export async function fetchTransferMemos(conn, programId, treePda) {
+  const sigs = await allSignatures(conn, treePda);
+  const out = [];
+  for (const { signature } of sigs) {
+    const tx = await conn.getTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    out.push(...transferMemoFromTx(tx, programId));
+  }
+  return out;
+}
+
+// NullifierSet borsh layout (mirrors programs/opaq/src/lib.rs):
+//   count u64 LE | nullifiers: Vec<[u8;32]> (u32 LE length prefix + 32B each)
+export function parseNullifierSet(data) {
+  const len = data.readUInt32LE(8);
+  const set = new Set();
+  for (let i = 0; i < len; i++) {
+    const off = 12 + i * 32;
+    set.add(hex(data.subarray(off, off + 32)));
+  }
+  return set;
+}
+
+export async function fetchNullifierSet(conn, nullifierPda) {
+  const info = await conn.getAccountInfo(nullifierPda, "confirmed");
+  if (!info) throw new Error("nullifier set account not found (pool not initialized?)");
+  return parseNullifierSet(info.data);
 }
 
 // The full ordered commitment (leaf) list, harvested purely over RPC.
