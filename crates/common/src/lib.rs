@@ -104,4 +104,33 @@ mod tests {
             println!("hash2({}, {}) = 0x{}", hex::encode(a), hex::encode(b), hex::encode(light));
         }
     }
+
+    /// M0 extension for B.12.9 (EVM Poseidon parity gate): hash_1 and hash_4
+    /// vectors, light-poseidon vs solana-poseidon, printed for cross-checking
+    /// against evm/src/PoseidonT2.sol / PoseidonT5.sol (evm/test/Poseidon.t.sol).
+    #[test]
+    fn parity_light_vs_solana_hash1_hash4() {
+        let single = [be32(1), be32(42), be32(987_654_321)];
+        for x in single {
+            let light = poseidon_be(&[x]);
+            let sol = hashv(Parameters::Bn254X5, Endianness::BigEndian, &[&x]).expect("solana poseidon").to_bytes();
+            assert_eq!(light, sol, "hash_1 mismatch for input {}", hex::encode(x));
+            println!("hash1({}) = 0x{}", hex::encode(x), hex::encode(light));
+        }
+
+        let quads: [[[u8; 32]; 4]; 2] = [
+            [be32(1), be32(2), be32(3), be32(4)],
+            [be32(0xAB), be32(1_000_000), be32(0xCD), be32(123_456_789)],
+        ];
+        for q in quads {
+            let light = poseidon_be(&q);
+            let refs: Vec<&[u8]> = q.iter().map(|x| x.as_slice()).collect();
+            let sol = hashv(Parameters::Bn254X5, Endianness::BigEndian, &refs).expect("solana poseidon").to_bytes();
+            assert_eq!(light, sol, "hash_4 mismatch for inputs {:?}", q.map(hex::encode));
+            println!(
+                "hash4({}, {}, {}, {}) = 0x{}",
+                hex::encode(q[0]), hex::encode(q[1]), hex::encode(q[2]), hex::encode(q[3]), hex::encode(light)
+            );
+        }
+    }
 }

@@ -1230,18 +1230,59 @@ tree insert + a spendable EVM note instead of a balance.
   `xburn.nr`'s `dest_chain` public input must match when Solana is the
   destination; `gen_witness`'s xburn fixture takes `OPAQ_XBURN_DEST_CHAIN` to
   target it independently of burn's Ethereum-mainnet fixture default.
-- **P4.2 — `OpaqPool.sol`** (Poseidon Merkle + nullifiers + xburn + mint_from_xburn)
-  with an M0-style Poseidon parity gate (EVM == circuit == Solana); Foundry tests.
+- **[x] P4.2 — `OpaqPool.sol`** (Poseidon Merkle + nullifiers + xburn +
+  mint_from_xburn) with an M0-style Poseidon parity gate (EVM == circuit ==
+  Solana); Foundry tests. 8 tests pass across 3 files:
+  - `evm/test/Poseidon.t.sol` — the parity gate itself (B.12.9), 3 tests.
+    Vendored `poseidon-solidity` v0.0.5's `PoseidonT2`/`PoseidonT3`/`PoseidonT5`
+    (Circom-compatible BN254 x^5 S-box, same family `light-poseidon`/
+    `sol_poseidon` already implement) into `evm/src/`, then checked its
+    `hash_1`/`hash_2`/`hash_4` output against vectors ALREADY cross-validated
+    light-poseidon == solana-poseidon (`crates/common`'s
+    `parity_light_vs_solana` / `parity_light_vs_solana_hash1_hash4`, the
+    latter added specifically to extend M0's net to hash_1/hash_4, not just
+    hash_2). All match byte-for-byte — the #1 risk (A.7/B.12.9) is closed
+    before `OpaqPool.sol`'s tree touches it.
+  - `evm/src/OpaqPool.sol` — depth-24 incremental tree + 32-slot root ring
+    buffer, seeded from `programs/opaq/src/tree_consts.rs::ZEROS`/`EMPTY_ROOT`
+    VERBATIM (not recomputed) so both chains' empty-tree state is
+    byte-identical from genesis. `mintFromXburn` fully tested against a REAL
+    Solana-origin xburn proof (`evm/test/XburnProof.sol`, generated from the
+    same witness M19 used, with the real non-degenerate PPoT so the `ecMul`
+    precompile accepts it — B.6/M15's finding): unattested nullifier, wrong
+    `dest_chain`, happy path (leaf 0 inserted), double-mint — all 4 of M19's
+    Solana-side cases, mirrored on the EVM side (`evm/test/OpaqPool.t.sol`).
+    `xburn()`'s root-check tested for unknown-root rejection standalone.
+  - **Scope note:** `xburn()`'s live happy path (EVM genuinely burning ITS OWN
+    note against ITS OWN on-chain root) isn't exercised here — building a
+    witness against `OpaqPool`'s actual on-chain tree state is P4.3's job
+    (the live round trip), not a standalone unit test's. `deposit()` (B.12.4's
+    "(optional)" EVM-native-asset escrow) wasn't built — a stub that inserts a
+    note without actually escrowing an ERC-20 would be misleading, and real
+    escrow is a separate feature, tracked as an explicit gap rather than
+    half-built.
+  - Also generalized `evm/gen_fixture.mjs` (was hardcoded to burn's 6 public
+    signals / `BurnProof` library name) to read the signal count from
+    `public.json` and take a library name argument — used for `XburnProof`
+    without touching the still-passing `BurnProof`/`OpaqMint` path.
 - **P4.3 — round-trip both ways, e2e m20:** Solana note → EVM note (forward,
   re-shield) and EVM note → Solana note (reverse), one proof each, live on validator
   + anvil (mirrors m18).
 
 **B.12.9 Open questions / risks.**
-- **EVM Poseidon gas:** a depth-24 Poseidon insert on EVM is expensive; benchmark
-  early (Tornado's insert is ~1–2M gas — the reference budget). Do NOT swap the hash
-  to save gas unless three-way parity (A.7) is preserved.
-- **Poseidon parity across three impls** (Noir circuit, Solana syscall, EVM Yul) is
-  the #1 risk (A.7) — extend M0's parity gate to the EVM impl before trusting it.
+- **EVM Poseidon gas:** not yet precisely isolated (a `forge test --gas-report`
+  quirk in this environment kept collapsing to "Nothing to compile" — unresolved
+  tooling issue, not a code issue). The full `mintFromXburn` call (proof
+  verification + one depth-24 insert) lands around ~1.3–1.5M gas in observed
+  test runs, which is in the same order as Tornado's ~1–2M gas reference
+  budget (B.12.9's original estimate) but conflates proof verification and
+  insert cost — isolate the insert-only cost before treating this as
+  confirmed. Do NOT swap the hash to save gas unless three-way parity (A.7)
+  is preserved.
+- **Poseidon parity across three impls (Noir circuit, Solana syscall, EVM):
+  RESOLVED, see P4.2 above.** `evm/test/Poseidon.t.sol` closes the #1 risk
+  (A.7) the same way M0 closed it for Solana — byte-identical hash_1/hash_2/
+  hash_4 across all three implementations, not just asserted.
 - **1-in/1-out only** (full-amount move, no change): partial cross-chain amounts
   need 1-in/2-out (a change note on the source) — defer to a P4.1.5 if wanted.
 - **Attestation** stays semi-trusted until the light client (A.9) — unchanged from
