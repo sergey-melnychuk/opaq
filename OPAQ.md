@@ -1595,22 +1595,56 @@ rather than pretend one design fits both chains:
   `chainId`) — relevant since `dest_chain` is already chain-agnostic (B.12.2).
 - **Solana leg (attesting a Solana `xburn`, for the Solana→EVM forward
   direction): plain HTTPS outcalls against a small, explicitly hardcoded set
-  of RPC URLs — deliberately not a generic multi-provider abstraction.**
+  of RPC URLs — deliberately not a generic multi-provider abstraction —
+  BUT verifying a specific named transaction, not bare set membership.**
   There's no DFINITY-maintained Solana equivalent of `evm-rpc-canister`. Keep
   this leg's scope tight: the canister makes its own outcalls (via
   `ic-cdk`'s HTTP outcall API, with a `transform` function stripping
   non-deterministic response fields so ICP's own replica-level consensus
-  succeeds) to a fixed list of e.g. 3 hardcoded Solana RPC endpoints —
-  `getAccountInfo` on the `NullifierSet` PDA at `"finalized"` commitment,
-  checking the specific nullifier's presence in the returned account bytes
-  (same parsing `tests/read_path.mjs::parseNullifierSet` already does
-  off-chain). Canister application code then requires ≥2-of-3 of *those*
-  hardcoded endpoints to agree before treating the burn as attested — the
-  same principle `evm-rpc-canister` automates for EVM, just implemented
-  directly since nothing does it for Solana yet. No dynamic provider
-  discovery, no configurable provider registry — 3 URLs, agreement logic,
-  done; expanding this into its own general-purpose service is explicitly
-  not this phase's job.
+  succeeds) to a fixed list of e.g. 3 hardcoded Solana RPC endpoints.
+
+  **Correction made while scoping this (checking bare `NullifierSet`
+  membership, as an earlier draft of this spec had it, is unsound):**
+  `NullifierSet` is shared across `withdraw`/`transfer`/`burn`/`xburn` by
+  design (B.2), and the nullifier formula (`Poseidon(commitment,
+  spend_key)`) is identical across all of them — same note, same nullifier,
+  regardless of which instruction spends it. Proof generation is purely
+  local and doesn't check global state, so nothing stops someone from
+  `withdraw`ing a note normally (real SPL released to them) and *separately*
+  constructing a valid `xburn.nr` proof for that same note anyway (they
+  still know its secrets), then submitting that proof straight to
+  `mintFromXburn`. A bare "is N in `NullifierSet`" check would see `true`
+  (from the withdraw) and wrongly attest it — real funds released on
+  Solana *and* a minted copy on the destination, same nullifier, no `xburn`
+  ever needed. Exactly the shape of counterfeiting bug rung 2 exists to
+  close, reintroduced through set-membership ambiguity instead of a
+  dishonest human.
+
+  **The fix:** the mint requester supplies the **transaction signature** of
+  their own `xburn` submission alongside the proof (they already have it —
+  they just submitted it). The canister calls `getTransaction(sig)` at
+  `"finalized"` commitment across the hardcoded endpoints, requires ≥2-of-3
+  agreement, and confirms **from the transaction's own instruction data**
+  (cryptographically bound to that specific executed transaction — not an
+  emitted log, unforgeable) that: (a) it succeeded (`meta.err == null`),
+  (b) its first byte is tag `8` (`xburn`, not `withdraw`/`transfer`/`burn`,
+  which have different tags and instruction shapes entirely — no ambiguity
+  possible), and (c) its embedded public inputs
+  (`src_merkle_root, src_nullifier, dest_chain, out_commitment`) exactly
+  match what the mint-requester's proof claims. This is a lookup of one
+  named transaction, not a scan — safe in the same way `evm-rpc-canister`'s
+  `eth_call` is safe, just implemented directly since nothing automates it
+  for Solana yet. As a side effect, this also closes a second, subtler gap
+  the same off-by-ambiguity opens: since `dest_chain`/`out_commitment` are
+  free choices at proof-generation time (unconstrained by the note itself),
+  a note owner could otherwise generate *multiple* valid proofs sharing one
+  nullifier but pointing at different destinations, and race to mint
+  whichever pending-flag check saw first — checking the exact recorded
+  transaction's own public inputs, not just "is this nullifier spent,"
+  pins the attestation to the one tuple that was actually burned. No
+  dynamic provider discovery, no configurable provider registry — 3 URLs,
+  one named-transaction check, done; expanding this into its own
+  general-purpose service is explicitly not this phase's job.
 
 **B.14.3 Finality/reorg handling.** Folded into the EVM leg via `BlockTag::
 Finalized` (B.14.2) — nothing to hand-roll there. For the Solana leg, query
@@ -1658,11 +1692,10 @@ worth naming rather than pretending rung 2 has zero operational trust left.
 **B.14.5 Canister state (persisted in stable memory, survives upgrades).**
 Reading state on demand (B.14.2) rather than scanning history means this is
 **request-driven, not a continuous watcher** — the note owner who wants to
-mint asks the canister to attest a specific nullifier; the canister doesn't
-need a "last processed block" watermark at all, since it's never scanning a
-range, only ever checking one nullifier at a time. That removes a whole
-class of state (and bugs) the original watch-everything design would have
-needed.
+mint asks the canister to attest, supplying the specific fact to check; the
+canister doesn't need a "last processed block" watermark at all, since it's
+never scanning a range. That removes a whole class of state (and bugs) the
+original watch-everything design would have needed.
 ```
 - attested_nullifiers: Set<[u8; 32]>   // idempotency — never attest the same nullifier twice
 - config (settable by canister controller, not by the attestation logic itself):
@@ -1673,6 +1706,14 @@ needed.
     solana_agreement_threshold: u8       // e.g. 2 of 3, Solana leg only (EVM leg's is evm-rpc-canister's own)
     xburn_pending_pda / nullifier_set_pda: Pubkey
 ```
+Attestation request shape (per B.14.2's fix, forward direction):
+`attest_solana_xburn(src_tx_signature: String, expected_nullifier,
+expected_dest_chain, expected_out_commitment)` — the requester names the
+exact transaction and the exact tuple their proof claims; the canister
+verifies both against the transaction's own instruction data, never against
+a bare nullifier lookup. The reverse direction's `eth_call` check (B.14.2)
+is already precise without this, since `nullifierSpent` is written only by
+`xburn()` — no equivalent tuple-binding needed there.
 
 **B.14.6 Build phases (P5, mirrors P2/P3/P4's style).** Shrunk materially by
 B.14.2/B.14.4's split — the EVM leg no longer needs its own multi-provider
@@ -1688,14 +1729,20 @@ agreement or finality logic built from scratch.
   spent/unspent nullifier returns `Consistent(true/false)` correctly; a
   submitted `addPending` tx lands and is queryable back via the same
   `eth_call` path.
-- **P5.2 — Solana leg: hardcoded-URL outcalls + agreement.** `ic-cdk` HTTP
-  outcalls (with a `transform` function) to 3 hardcoded Solana RPC endpoints,
-  `getAccountInfo` on `NullifierSet` at `"finalized"`, parse per
-  `tests/read_path.mjs::parseNullifierSet`'s layout, require ≥2-of-3
-  agreement on nullifier presence. *Accept:* agreeing endpoints -> proceeds;
-  a simulated disagreeing endpoint (stale/wrong data) -> rejects/retries,
-  does not attest. Also covers Solana-side submission (`sendTransaction` for
-  `add_pending_xburn`) via the same hardcoded endpoints.
+- **P5.2 — Solana leg: hardcoded-URL outcalls + named-transaction
+  verification.** `ic-cdk` HTTP outcalls (with a `transform` function) to 3
+  hardcoded Solana RPC endpoints, `getTransaction(src_tx_signature)` at
+  `"finalized"` commitment, require ≥2-of-3 agreement, then check (per
+  B.14.2's fix): tx succeeded, first instruction-data byte is tag `8`, and
+  its embedded public inputs exactly match the requester's claimed
+  `(nullifier, dest_chain, out_commitment)`. *Accept:* a genuine finalized
+  `xburn` tx with matching claims -> attests; a `withdraw`/`transfer`/`burn`
+  tx recording the *same* nullifier (different tag) -> rejects, does not
+  attest (the specific bug this design closes); mismatched claimed
+  `out_commitment`/`dest_chain` against what the named tx actually recorded
+  -> rejects; a simulated disagreeing endpoint -> rejects/retries. Also
+  covers Solana-side submission (`sendTransaction` for `add_pending_xburn`)
+  via the same hardcoded endpoints.
 - **P5.3 — end-to-end attestation, one direction.** Canister checks a REAL
   `xburn` nullifier on a public Solana **devnet** (the Solana leg needs real
   reachable HTTPS endpoints — this is the one leg in the whole project that
@@ -1739,3 +1786,32 @@ agreement or finality logic built from scratch.
   the kind of soundness-critical surface that needs the same external-audit
   treatment already flagged as an outstanding blocker for the rest of the
   protocol (B.11 item #2).
+- **Canister controller/upgrade governance — not yet specified, and it
+  matters as much as the RPC-agreement logic.** Whoever can upgrade this
+  canister's wasm or edit its config (`opaq_pool_addr`, `evm_network`, the
+  hardcoded Solana URLs, B.14.5) can silently repoint or replace the
+  attestation logic entirely, bypassing every careful check in B.14.2 —
+  a single controller key today is the same rung-1 problem this whole phase
+  exists to move away from, just relocated to a different layer. Needs an
+  actual answer (multisig, timelock, DAO-style controller) before rung 2 is
+  meaningfully stronger than rung 1 in practice, not just on paper.
+- **On-chain gap found while fixing the above, not yet closed:**
+  `addPending`/`add_pending_xburn` (`programs/opaq/src/lib.rs`,
+  `evm/src/OpaqPool.sol`) record only a bare nullifier — never the
+  `(dest_chain, out_commitment)` tuple the attestor actually verified. Since
+  those fields are free choices at proof-generation time (unconstrained by
+  the note itself), a note owner can generate multiple valid `xburn.nr`
+  proofs sharing one nullifier but pointing at different destinations.
+  Today, only the *attestor's* discipline (B.14.2's fix) prevents a
+  mismatched one from being attested; the on-chain `pendingMint`/
+  `XburnPending` entry doesn't itself bind or re-check the tuple at mint
+  time, so this is defense-in-depth the contracts don't currently provide.
+  Not exploitable as theft (only the note owner, who holds `spend_key`, can
+  ever produce any valid proof for that nullifier — worst case is the owner
+  having some post-burn flexibility in choosing their own destination,
+  capped at one successful mint by the existing `minted` guard), but a more
+  robust design would store the tuple (or its hash) in the pending entry and
+  have `mintFromXburn`/`mint_from_xburn` check the submitted proof's own
+  public inputs against it. That's a contract change to already-shipped,
+  M19/M20-tested code, not part of B.14's attestor scope — tracked here as a
+  follow-up, not folded in silently.
