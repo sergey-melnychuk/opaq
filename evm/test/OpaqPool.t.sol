@@ -49,39 +49,49 @@ contract OpaqPoolTest {
 
         // (2) mint before the operator attests it -> rejected (unattested nullifier).
         vm.chainId(destChain);
-        vm.expectRevert(bytes("not pending / already minted"));
+        vm.expectRevert(bytes("not pending / wrong destination"));
         pool.mintFromXburn(a, b, c, sig);
 
-        // (3) operator attests the source-chain burn; wrong dest_chain -> rejected.
+        // (3) operator attests the source-chain burn (binding the exact
+        // (destChain, outCommitment) tuple, not just the nullifier — B.12.5);
+        // wrong dest_chain -> rejected.
         vm.prank(OPERATOR);
-        pool.addPending(nullifier);
+        pool.addPending(nullifier, destChain, uint256(outCommitment));
         vm.chainId(destChain + 1);
         vm.expectRevert(bytes("wrong dest chain"));
         pool.mintFromXburn(a, b, c, sig);
 
-        // (4) correct chain -> mint succeeds: re-shields outCommitment as leaf 0.
+        // (3b) a proof claiming the RIGHT nullifier but a DIFFERENT
+        // out_commitment than what was attested -> rejected. This is the
+        // tuple-binding check itself: a bare nullifier flag would have let
+        // this through (found while scoping the ICP attestor, B.14.7).
         vm.chainId(destChain);
+        uint256[4] memory tamperedSig = [sig[0], sig[1], sig[2], sig[3] + 1];
+        vm.expectRevert(bytes("not pending / wrong destination"));
+        pool.mintFromXburn(a, b, c, tamperedSig);
+
+        // (4) correct chain, matching tuple -> mint succeeds: re-shields
+        // outCommitment as leaf 0.
         pool.mintFromXburn(a, b, c, sig);
         require(pool.minted(nullifier), "nullifier not marked minted");
-        require(!pool.pendingMint(nullifier), "pending not consumed");
+        require(pool.pendingMint(nullifier) == bytes32(0), "pending not consumed");
         require(pool.nextIndex() == 1, "outCommitment should be inserted as leaf 0");
         require(pool.roots(pool.currentRootIndex()) != 0, "root should have moved off genesis");
 
-        // (5) double-mint -> rejected (permanent guard).
-        vm.expectRevert(bytes("not pending / already minted"));
+        // (5) double-mint -> rejected (permanent guard; checked before the
+        // pending/tuple check, since pendingMint was already deleted above).
+        vm.expectRevert(bytes("already minted"));
         pool.mintFromXburn(a, b, c, sig);
 
         // (6) operator re-adds a consumed nullifier -> rejected (can't resurrect).
         vm.prank(OPERATOR);
         vm.expectRevert(bytes("already minted"));
-        pool.addPending(nullifier);
-
-        outCommitment; // silence unused-var warning; kept for readability above
+        pool.addPending(nullifier, destChain, uint256(outCommitment));
     }
 
     function test_onlyOperatorCanAddPending() public {
         vm.expectRevert(bytes("not operator"));
-        pool.addPending(bytes32(uint256(0x1234)));
+        pool.addPending(bytes32(uint256(0x1234)), 1, 2);
     }
 
     // xburn() as the SOURCE: the cheap root-membership check must reject an

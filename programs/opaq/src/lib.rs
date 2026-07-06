@@ -56,6 +56,7 @@ pub const E_WRONG_MINT: u32 = 7;
 pub const E_WRONG_OPERATOR: u32 = 8; // add_pending_xburn signer != XburnPending.operator
 pub const E_NOT_PENDING: u32 = 9; // mint_from_xburn: nullifier never attested (or already minted)
 pub const E_WRONG_CHAIN: u32 = 10; // mint_from_xburn: proof's dest_chain != SOLANA_CHAIN_ID
+pub const E_WRONG_DESTINATION: u32 = 11; // mint_from_xburn: proof's (dest_chain, out_commitment) != what was attested
 
 /// SPL Token program id (`Tokenkeg…`). Funds only ever move via a CPI to THIS
 /// program, so it must be validated: otherwise a no-op/forged "token program"
@@ -275,13 +276,24 @@ impl NullifierSet {
 
 // XburnPending (B.12.5): mirrors OpaqMint.sol's pendingMint/minted mappings on
 // the Solana side. Zero-copy layout: operator[32] | count u64 LE [32..40] |
-// entries (nullifier[32] ‖ minted:u8) repeated from 40. Same append-only,
-// linear-scan, realloc-grown shape as NullifierSet (B.2) — appropriate for the
-// same reason (few entries relative to mainnet nullifier-set scale, A.10).
+// entries (nullifier[32] ‖ expected_hash[32] ‖ minted:u8) repeated from 40.
+// Same append-only, linear-scan, realloc-grown shape as NullifierSet (B.2) —
+// appropriate for the same reason (few entries relative to mainnet
+// nullifier-set scale, A.10).
+//
+// `expected_hash = hash2(dest_chain, out_commitment)` closes a real gap: a
+// bare nullifier->bool mapping doesn't bind WHICH (dest_chain, out_commitment)
+// was actually attested. dest_chain/out_commitment are free choices at
+// proof-generation time (unconstrained by the note itself), so a note owner
+// could otherwise generate multiple valid xburn proofs sharing one nullifier
+// but pointing at different destinations, and mint_from_xburn would accept
+// whichever arrived first — the contract had no way to check "is this the
+// specific tuple that was attested." Storing the hash and checking it at
+// mint time closes that at the contract level, not just via attestor care.
 const XP_OFF_OPERATOR: usize = 0;
 const XP_OFF_COUNT: usize = 32;
 const XP_OFF_ENTRIES: usize = 40;
-const XP_ENTRY_SIZE: usize = 33; // nullifier(32) + minted(1)
+const XP_ENTRY_SIZE: usize = 65; // nullifier(32) + expected_hash(32) + minted(1)
 const XBURN_PENDING_INIT_SIZE: usize = XP_OFF_ENTRIES;
 
 fn xpending_operator(data: &[u8]) -> Pubkey {
@@ -298,13 +310,19 @@ fn xpending_find(data: &[u8], nullifier: &[u8; 32]) -> Option<usize> {
     (0..count).map(|i| XP_OFF_ENTRIES + i * XP_ENTRY_SIZE).find(|&off| &data[off..off + 32] == nullifier)
 }
 
-/// Append a fresh pending entry (minted=false). Caller must have already
-/// checked `xpending_find` returns `None` — this never dedupes itself.
+fn xpending_expected_hash(data: &[u8], entry_off: usize) -> [u8; 32] {
+    read32(data, entry_off + 32)
+}
+
+/// Append a fresh pending entry (minted=false), binding it to
+/// `expected_hash = hash2(dest_chain, out_commitment)`. Caller must have
+/// already checked `xpending_find` returns `None` — this never dedupes itself.
 fn xpending_append<'a>(
     payer: &AccountInfo<'a>,
     xp: &AccountInfo<'a>,
     system: &AccountInfo<'a>,
     nullifier: [u8; 32],
+    expected_hash: [u8; 32],
 ) -> ProgramResult {
     let count = xpending_count(&xp.data.borrow());
     let new_len = XP_OFF_ENTRIES + (count as usize + 1) * XP_ENTRY_SIZE;
@@ -327,7 +345,8 @@ fn xpending_append<'a>(
     let mut data = xp.data.borrow_mut();
     let off = XP_OFF_ENTRIES + count as usize * XP_ENTRY_SIZE;
     data[off..off + 32].copy_from_slice(&nullifier);
-    data[off + 32] = 0; // minted = false
+    data[off + 32..off + 64].copy_from_slice(&expected_hash);
+    data[off + 64] = 0; // minted = false
     let count2 = count + 1;
     data[XP_OFF_COUNT..XP_OFF_COUNT + 8].copy_from_slice(&count2.to_le_bytes());
     Ok(())
@@ -852,14 +871,24 @@ fn initialize_xburn_pending(program_id: &Pubkey, accounts: &[AccountInfo], args:
 /// Phase 4 (B.12.5): the operator mirrors a finalized SOURCE-chain `xburn` by
 /// attesting its nullifier here — the ONLY trust in the bridge (A.9): the
 /// operator posts a boolean, never sees a secret (the proof itself binds the
-/// nullifier to token/amount/destination note).
+/// nullifier to token/amount/destination note). Binds `dest_chain`/
+/// `out_commitment` into the pending entry (as `hash2(dest_chain,
+/// out_commitment)`) so `mint_from_xburn` can check the submitted proof
+/// matches the SPECIFIC tuple attested here, not just that the nullifier is
+/// "spent somewhere" — dest_chain/out_commitment are free choices at
+/// proof-generation time, so a bare nullifier flag can't tell which
+/// destination was actually attested (found while scoping the ICP attestor,
+/// see OPAQ.md B.14.7).
 /// Accounts: [operator (signer,w, also funds rent), xburn_pending (w), system_program]
-/// Args (32): src_nullifier
+/// Args (96): src_nullifier(32) dest_chain(32) out_commitment(32)
 fn add_pending_xburn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
-    if args.len() != 32 {
+    if args.len() != 32 + 32 + 32 {
         return Err(ProgramError::InvalidInstructionData);
     }
     let src_nullifier: [u8; 32] = args[0..32].try_into().unwrap();
+    let dest_chain: [u8; 32] = args[32..64].try_into().unwrap();
+    let out_commitment: [u8; 32] = args[64..96].try_into().unwrap();
+    let expected_hash = hash2(&dest_chain, &out_commitment);
 
     let iter = &mut accounts.iter();
     let operator = next_account_info(iter)?;
@@ -881,7 +910,7 @@ fn add_pending_xburn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8])
         // guard") — reject rather than silently accept a duplicate attestation.
         return Err(ProgramError::Custom(E_ALREADY_SPENT));
     }
-    xpending_append(operator, xp_ai, system, src_nullifier)?;
+    xpending_append(operator, xp_ai, system, src_nullifier, expected_hash)?;
 
     msg!("opaq: xburn pending added");
     Ok(())
@@ -939,14 +968,21 @@ fn mint_from_xburn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -
     let mint_offset = {
         let data = xp_ai.data.borrow();
         let off = xpending_find(&data, &src_nullifier).ok_or(ProgramError::Custom(E_NOT_PENDING))?;
-        if data[off + 32] != 0 {
+        if data[off + 64] != 0 {
             return Err(ProgramError::Custom(E_ALREADY_SPENT)); // already minted
+        }
+        // Bind check (B.12.5, see add_pending_xburn's doc comment): the
+        // submitted proof's own (dest_chain, out_commitment) must match what
+        // was actually attested for this nullifier, not just that SOME entry
+        // exists — closes the "which destination was really burned for" gap.
+        if xpending_expected_hash(&data, off) != hash2(&dest_chain, &out_commitment) {
+            return Err(ProgramError::Custom(E_WRONG_DESTINATION));
         }
         off
     };
 
     let leaf_index = tree_insert(&mut tree_ai.data.borrow_mut(), out_commitment)?;
-    xp_ai.data.borrow_mut()[mint_offset + 32] = 1; // mark minted
+    xp_ai.data.borrow_mut()[mint_offset + 64] = 1; // mark minted
 
     msg!("opaq: mint_from_xburn ok, leaf={}", leaf_index);
     Ok(())

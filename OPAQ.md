@@ -1218,6 +1218,26 @@ style pool speaking Opaq's note format:
   PDA via `add_pending_xburn`) and not yet minted; `tree_insert(out_commitment)`;
   marks minted. Reuses the existing verifier + `tree_insert`; `XburnPending`
   mirrors `OpaqMint.sol`'s `pendingMint`/`minted` maps (B.12.4).
+  **Hardened (found + fixed while scoping the ICP attestor, B.14.7):**
+  `add_pending_xburn` now takes `(src_nullifier, dest_chain, out_commitment)`
+  and stores `hash2(dest_chain, out_commitment)` in the pending entry (33
+  bytes -> 65 bytes/entry), not just the bare nullifier — `mint_from_xburn`
+  checks the submitted proof's own `(dest_chain, out_commitment)` hashes to
+  the stored value (`E_WRONG_DESTINATION` otherwise) before minting. Bare
+  nullifier tracking let a note owner generate multiple valid proofs sharing
+  one nullifier but claiming different destinations, since `dest_chain`/
+  `out_commitment` are free choices at proof-generation time, unconstrained
+  by the note itself; the contract had no way to check "is this the specific
+  tuple that was attested," only "is this nullifier marked pending
+  somewhere." Not a theft vector (only the note owner can ever produce a
+  valid proof for their own nullifier), but real defense-in-depth the
+  contract now provides instead of leaving entirely to attestor discipline.
+  `OpaqPool.sol`'s `addPending`/`pendingMint`/`mintFromXburn` got the
+  identical fix (`mapping(bytes32 => bytes32)`, keyed hash instead of bool).
+  Verified live: M19/M20 both re-pass with the new tuple-binding checks in
+  the critical path; `evm/test/OpaqPool.t.sol` gained a regression case
+  submitting a proof with a tampered `out_commitment` against an otherwise
+  correctly-attested nullifier, asserting `"not pending / wrong destination"`.
 
 **B.12.6 Attestation & trust (A.9, shared, direction-agnostic).** Each direction
 mirrors the source's finalized nullifier into the destination's `pending` set via
@@ -1795,23 +1815,19 @@ agreement or finality logic built from scratch.
   exists to move away from, just relocated to a different layer. Needs an
   actual answer (multisig, timelock, DAO-style controller) before rung 2 is
   meaningfully stronger than rung 1 in practice, not just on paper.
-- **On-chain gap found while fixing the above, not yet closed:**
-  `addPending`/`add_pending_xburn` (`programs/opaq/src/lib.rs`,
-  `evm/src/OpaqPool.sol`) record only a bare nullifier — never the
-  `(dest_chain, out_commitment)` tuple the attestor actually verified. Since
-  those fields are free choices at proof-generation time (unconstrained by
-  the note itself), a note owner can generate multiple valid `xburn.nr`
-  proofs sharing one nullifier but pointing at different destinations.
-  Today, only the *attestor's* discipline (B.14.2's fix) prevents a
-  mismatched one from being attested; the on-chain `pendingMint`/
-  `XburnPending` entry doesn't itself bind or re-check the tuple at mint
-  time, so this is defense-in-depth the contracts don't currently provide.
-  Not exploitable as theft (only the note owner, who holds `spend_key`, can
-  ever produce any valid proof for that nullifier — worst case is the owner
-  having some post-burn flexibility in choosing their own destination,
-  capped at one successful mint by the existing `minted` guard), but a more
-  robust design would store the tuple (or its hash) in the pending entry and
-  have `mintFromXburn`/`mint_from_xburn` check the submitted proof's own
-  public inputs against it. That's a contract change to already-shipped,
-  M19/M20-tested code, not part of B.14's attestor scope — tracked here as a
-  follow-up, not folded in silently.
+- **On-chain gap found while scoping the attestor — [x] FIXED (see
+  B.12.5).** `addPending`/`add_pending_xburn` originally recorded only a
+  bare nullifier, never the `(dest_chain, out_commitment)` tuple the
+  attestor actually verified — since those fields are free choices at
+  proof-generation time (unconstrained by the note itself), a note owner
+  could generate multiple valid `xburn.nr` proofs sharing one nullifier but
+  pointing at different destinations, and the contract had no way to check
+  which one was actually attested (not a theft vector — only the note
+  owner, who holds `spend_key`, can ever produce a valid proof for that
+  nullifier — but real defense-in-depth the contracts didn't provide,
+  leaving it entirely to attestor discipline). Fixed directly in
+  already-shipped, M19/M20-tested code rather than left as a follow-up:
+  both `programs/opaq`'s `XburnPending` and `OpaqPool.sol`'s `pendingMint`
+  now store a hash of the attested tuple and `mint_from_xburn`/
+  `mintFromXburn` check the submitted proof's own public inputs against it.
+  M19/M20 re-verified live with the fix in the critical path.

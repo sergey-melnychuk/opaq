@@ -119,8 +119,14 @@ async function main() {
   // --- forward leg: attest + mintFromXburn on OpaqPool (EVM as DESTINATION) ---
   const pub1 = JSON.parse(fs.readFileSync(path.join(prove1Dir, "public.json"), "utf8"));
   const nullifier1 = "0x" + BigInt(pub1[1]).toString(16).padStart(64, "0");
+  const destChain1 = pub1[2];
+  const outCommitment1 = pub1[3];
 
-  cast(["send", opaqPoolAddr, "addPending(bytes32)", nullifier1, "--rpc-url", evmRpc, "--private-key", opKey]);
+  // Binds the full (destChain, outCommitment) tuple, not just the nullifier
+  // (B.12.5's fix) — a bare nullifier flag would let a mismatched proof
+  // sharing this nullifier mint against a different destination.
+  cast(["send", opaqPoolAddr, "addPending(bytes32,uint256,uint256)", nullifier1, destChain1, outCommitment1,
+    "--rpc-url", evmRpc, "--private-key", opKey]);
   const mintTx = evmMint(
     path.join(prove1Dir, "public.json"), path.join(prove1Dir, "proof.json"),
     "mintFromXburn(uint256[2],uint256[2][2],uint256[2],uint256[4])",
@@ -150,8 +156,10 @@ async function main() {
 
   // --- attest + mint_from_xburn on Solana (tag 7, Solana as DESTINATION again) ---
   const nullifier2 = Buffer.from(BigInt(pub2[1]).toString(16).padStart(64, "0"), "hex");
+  const destChain2 = Buffer.from(BigInt(pub2[2]).toString(16).padStart(64, "0"), "hex");
+  const outCommitment2 = Buffer.from(BigInt(pub2[3]).toString(16).padStart(64, "0"), "hex");
   await send(new TransactionInstruction({
-    programId, data: Buffer.concat([Buffer.from([6]), nullifier2]),
+    programId, data: Buffer.concat([Buffer.from([6]), nullifier2, destChain2, outCommitment2]),
     keys: [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: xpending, isSigner: false, isWritable: true },

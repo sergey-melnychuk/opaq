@@ -20,6 +20,8 @@ const rpc = process.argv[6] || "http://127.0.0.1:8899";
 const programId = kp(progPath).publicKey;
 const valuesA = JSON.parse(fs.readFileSync(valuesAPath, "utf8"));
 const srcNullifierA = Buffer.from(valuesA.src_nullifier, "hex");
+const destChainA = Buffer.from(valuesA.dest_chain, "hex");
+const outCommitmentA = Buffer.from(valuesA.out_commitment, "hex");
 
 const conn = new Connection(rpc, "confirmed");
 const payer = Keypair.generate();
@@ -57,10 +59,11 @@ async function main() {
   }));
   console.log("  OK  xburn_pending initialized (operator = payer)");
 
-  // attest fixture A's src_nullifier (simulates the operator mirroring a
-  // finalized EVM-source xburn, A.9)
+  // attest fixture A's (src_nullifier, dest_chain, out_commitment) tuple
+  // (simulates the operator mirroring a finalized EVM-source xburn, A.9) —
+  // binding the full tuple, not just the nullifier, is the B.12.5 fix.
   await send(new TransactionInstruction({
-    programId, data: Buffer.concat([Buffer.from([6]), srcNullifierA]),
+    programId, data: Buffer.concat([Buffer.from([6]), srcNullifierA, destChainA, outCommitmentA]),
     keys: [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: xpending, isSigner: false, isWritable: true },

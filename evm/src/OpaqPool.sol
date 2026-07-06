@@ -58,11 +58,18 @@ contract OpaqPool {
     uint256[TREE_DEPTH] public zeros;
 
     mapping(bytes32 => bool) public nullifierSpent; // this pool's OWN xburn nullifiers (EVM as SOURCE)
-    mapping(bytes32 => bool) public pendingMint; // operator-attested source-chain xburns (EVM as DEST)
+    // operator-attested source-chain xburns (EVM as DEST): nullifier => hash
+    // of the SPECIFIC (destChain, outCommitment) attested, 0 = not pending.
+    // Bare bool here would let mintFromXburn accept ANY proof sharing this
+    // nullifier, not just the one actually attested — destChain/outCommitment
+    // are free choices at proof-generation time, unconstrained by the note
+    // itself, so a bare flag can't tell which destination was really burned
+    // for (found while scoping the ICP attestor, see OPAQ.md B.14.7).
+    mapping(bytes32 => bytes32) public pendingMint;
     mapping(bytes32 => bool) public minted; // permanent double-mint guard
 
     event XBurned(bytes32 indexed nullifier, bytes32 destChain, bytes32 outCommitment);
-    event PendingAdded(bytes32 indexed nullifier);
+    event PendingAdded(bytes32 indexed nullifier, uint256 destChain, uint256 outCommitment);
     event Minted(bytes32 indexed nullifier, bytes32 indexed outCommitment, uint256 leafIndex);
 
     modifier onlyOperator() {
@@ -165,11 +172,13 @@ contract OpaqPool {
 
     /// Operator mirrors a FINALIZED source-chain xburn (A.9 — the only trust;
     /// the proof itself binds nullifier <-> token/amount/destination note).
-    /// Refuses to resurrect a consumed nullifier, mirroring OpaqMint.sol.
-    function addPending(bytes32 nullifier) external onlyOperator {
+    /// Binds the SPECIFIC (destChain, outCommitment) attested, not just the
+    /// nullifier — see the `pendingMint` doc comment. Refuses to resurrect a
+    /// consumed nullifier, mirroring OpaqMint.sol.
+    function addPending(bytes32 nullifier, uint256 destChain, uint256 outCommitment) external onlyOperator {
         require(!minted[nullifier], "already minted");
-        pendingMint[nullifier] = true;
-        emit PendingAdded(nullifier);
+        pendingMint[nullifier] = keccak256(abi.encode(destChain, outCommitment));
+        emit PendingAdded(nullifier, destChain, outCommitment);
     }
 
     /// THIS pool as the DESTINATION: re-shield a source-chain burn by
@@ -179,7 +188,12 @@ contract OpaqPool {
         external
     {
         bytes32 nullifier = bytes32(signals[1]);
-        require(pendingMint[nullifier] && !minted[nullifier], "not pending / already minted");
+        require(!minted[nullifier], "already minted");
+        // Check `minted` first (above): once consumed, pendingMint[nullifier]
+        // is deleted, so a stale re-submission must fail as "already minted",
+        // not fall through to "not pending" — order matters here.
+        bytes32 expected = keccak256(abi.encode(signals[2], signals[3]));
+        require(pendingMint[nullifier] == expected && expected != bytes32(0), "not pending / wrong destination");
         require(signals[2] == block.chainid, "wrong dest chain");
         require(verifier.verifyProof(a, b, c, signals), "bad proof");
 
