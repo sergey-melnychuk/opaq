@@ -920,16 +920,23 @@ If the implementing agent finds itself building any of the above mid-Phase-1, th
 
 ### B.11 Next Steps (consolidated roadmap)
 
-**Status: the full protocol is built and end-to-end-verified across all three
+**Status: the full protocol is built and end-to-end-verified across all four
 phases** — Phase 1 (deposit/withdraw, hardened by 2 audit fixes + CU-benchmarked),
 Phase 2 (private transfer with hidden amount *and* token; `opaq
-deposit→transfer→withdraw` CLI loop, m12/m13), and Phase 3 (Solana `burn` + EVM
-`OpaqMint` cross-chain mint, m14/m15). The ceremony tooling (#1) and a focused
-audit self-review (#2) are done. It is nonetheless a **verified research
-implementation, not a deployable pool**: every embedded VK is still the insecure
-test VK, the bridge's relay/operator isn't built, and transfers need out-of-band
-note delivery. The numbered items (1)–(6) below are the per-area status records;
-the prioritized pipeline of what to do *next* is right here:
+deposit→transfer→withdraw` CLI loop, m12/m13), Phase 2.5 (B.13 viewing keys —
+independent, rotatable `view_key` + encrypted transfer memos + `opaq
+list-unspent`, closing the received-note-discovery gap, m21), Phase 3 (Solana
+`burn` + EVM `OpaqMint` cross-chain mint, both directions self-served, no
+relayer, m14–m18), and **Phase 4 — the symmetric bridge** (`OpaqPool.sol`
+replaces `OpaqMint`'s balance ledger with a real re-shielded note on both
+ends; live round trip Solana→EVM→Solana, m19/m20). The ceremony tooling (#1)
+and a focused audit self-review (#2) are done. It is nonetheless a **verified
+research implementation, not a deployable pool**: every embedded VK is still
+the insecure test VK, the bridge's attestation is a single semi-trusted
+operator (A.9 rung 1, not yet an ICP canister/light client), and Phase 4's
+in-EVM `deposit` (native-asset escrow) isn't built. The numbered items (1)–(6)
+below are the per-area status records; the prioritized pipeline of what to do
+*next* is right here:
 
 **The pipeline from here (in priority order):**
 
@@ -943,19 +950,23 @@ the prioritized pipeline of what to do *next* is right here:
    `tools/noir-groth16` backend (ideally replaced by a minimal owned ACIR→R1CS for
    just `AssertZero`+`RANGE`), and `evm/OpaqMint.sol` + the generated verifier. The
    self-review (#2) found+fixed 2 real bugs but is not a substitute.
-3. **Make the bridge drivable — FORWARD SIDE DONE (P3.2–P3.5).** `opaq burn`
-   (`--prove`/`--submit`, self-served Solana burn; verified by m16) + `evm/mint.mjs`
-   (turns the burn proof into an `OpaqMint.mint` call via Foundry `cast`, self-served
-   EVM mint; verified by m17) let one person drive burn→mint with **no relayer**, on
-   a live validator and anvil. Remaining: the **attestation** gating `addPending` —
-   an ICP operator canister (A.9 rung 2) or, zero-infra, an on-chain Solana light
-   client (rung 4); and the **reverse direction** (EVM burn → Solana mint).
-4. **Received-note discovery** (wallet UX) — **now spec'd, see B.13.** Today
-   transfer outputs are handed over out-of-band. B.13 specs an independent
-   X25519 `view_key` (separate from `spend_key`, rotatable, per-note encrypted
-   memos riding along in the `transfer` instruction's own data — zero circuit
-   or ceremony impact) plus `opaq list-unspent`. Not yet implemented (P2.5.0
-   in progress).
+3. **Bridge drivable both ways, symmetric — DONE (P3.2–P3.5, P4.0–P4.3).**
+   `opaq burn`/`evm/mint.mjs` drive the original balance-ledger forward path
+   (m16/m17/m18). The **symmetric** replacement (`OpaqPool.sol`, B.12) closes
+   the loop for real: Solana `xburn` (tag 8) → `OpaqPool.mintFromXburn` (a
+   real re-shielded note, not a balance) → `OpaqPool.xburn` (EVM as source)
+   → Solana `mint_from_xburn` (tag 7) — live round trip verified by **m20**.
+   Remaining: the **attestation** gating `addPending`/`add_pending_xburn` is
+   still a single semi-trusted operator (A.9 rung 1) both ways — an ICP
+   operator canister (rung 2) or an on-chain light client (rung 4) is the
+   next real trust reduction, not a protocol change.
+4. **Received-note discovery** (wallet UX) — **DONE, see B.13.** An
+   independent X25519 `view_key` (separate from `spend_key`, rotatable,
+   per-note encrypted memos riding along in the `transfer` instruction's own
+   data — zero circuit or ceremony impact) plus `opaq list-unspent`. Verified
+   end-to-end on a validator by **m21**: Alice sends to Bob's published
+   meta-address with zero prior contact; Bob discovers and withdraws the note
+   using only his identity file.
 5. **Phase 1.5 perf** (non-blocking): swap the O(n) nullifier scan for a
    sorted/hash-table set before mainnet scale (measured headroom ~41k nullifiers,
    ~31 CU each).
@@ -1265,9 +1276,56 @@ tree insert + a spendable EVM note instead of a balance.
     signals / `BurnProof` library name) to read the signal count from
     `public.json` and take a library name argument — used for `XburnProof`
     without touching the still-passing `BurnProof`/`OpaqMint` path.
-- **P4.3 — round-trip both ways, e2e m20:** Solana note → EVM note (forward,
-  re-shield) and EVM note → Solana note (reverse), one proof each, live on validator
-  + anvil (mirrors m18).
+- **[x] P4.3 — round-trip both ways, e2e m20** (`scripts/m20-symmetric-
+  roundtrip.sh`, `tests/m20_symmetric_roundtrip.mjs`): Solana note → EVM note
+  (forward, re-shield) and EVM note → Solana note (reverse), one proof each,
+  live on a validator + anvil simultaneously (mirrors m18's "one person, one
+  proof" structure). **Phase 4 is now fully closed** — deposit → xburn (tag
+  8, Solana as source) → attest + `mintFromXburn` on `OpaqPool` (EVM as
+  destination, a real note lands as leaf 0, not a balance) → `xburn` off
+  `OpaqPool` (EVM as source, the SAME note) → attest + `mint_from_xburn` (tag
+  7, Solana as destination again, leaf 1) — all against real on-chain state,
+  not fixtures.
+
+  **What P4.3 required that P4.1 deferred:** P4.1's scoping note explicitly
+  left Solana's *source*-side xburn (`burn`-shaped, tag 4) undone, since
+  building it before `OpaqPool.sol` existed would've had no destination to
+  mint into. P4.3 is where that became necessary — added as a NEW instruction
+  (tag 8 `xburn`, not a tag-4 migration, for the same additive-only reasoning
+  as P4.1) that mirrors `burn`'s exact shape with xburn.nr's 4 public inputs
+  and the already-embedded `XBURN_VK`. `gen_witness.rs` gained an `xburn2`
+  witness block whose SOURCE note is provably the same note the forward leg's
+  `xburn` witness mints as its DESTINATION note (shared secrets, not just
+  shared values) — closing the loop for real, not two independent proofs that
+  happen to look similar.
+
+  Two real bugs found and fixed while wiring this up:
+  - `evm/gen_fixture.mjs`/`evm/mint.mjs` were hardcoded to burn's 6-signal
+    `OpaqMint.mint(...)` shape (function name + array size baked in).
+    Generalized both to take the signal count / function signature as
+    parameters (reading the count from `public.json` where possible) — used
+    for `OpaqPool`'s 4-signal `mintFromXburn`/`xburn` without touching the
+    still-passing `BurnProof`/`OpaqMint` path.
+  - `forge create` doesn't auto-link `PoseidonT3`'s `public` library
+    functions the way `forge test`'s deployer does — a direct `OpaqPool`
+    deploy failed with "Dynamic linking not supported" until `PoseidonT3` was
+    deployed first and passed via `--libraries`. `cast call`'s `(uint256)`
+    return-type formatting also appends a `[1.2e76]`-style scientific-
+    notation hint to large numbers, which silently breaks a naive
+    `BigInt(...)` parse — stripped in `tests/m20_symmetric_roundtrip.mjs`'s
+    `cast()` helper.
+
+  **Recurring workspace gotcha, not a code bug:** `evm/src/Groth16VerifierXburn.sol`
+  and `evm/test/XburnProof.sol` are gitignored, regenerated-locally artifacts
+  (B.6 — the EVM `ecMul` precompile needs the real PPoT, unlike Solana's
+  tolerant `groth16-solana`). Multiple scripts (`scripts/p4.2-opaqpool.sh`,
+  `scripts/m20-symmetric-roundtrip.sh`) each regenerate their OWN consistent
+  pair with a fresh zkey contribution — running one after the other leaves
+  the LAST one's pair in the working tree, desyncing `forge test` against
+  whichever pair a PRIOR script left (surfaced 3 times this session; same
+  root cause as the pre-existing `Groth16Verifier.sol`/`BurnProof.sol`
+  desync fixed during P4.2). Harmless and expected — just re-run whichever
+  script you care about last before `forge test`.
 
 **B.12.9 Open questions / risks.**
 - **EVM Poseidon gas:** not yet precisely isolated (a `forge test --gas-report`

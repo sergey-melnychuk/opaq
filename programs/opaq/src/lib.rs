@@ -350,6 +350,7 @@ pub fn process_instruction(
         5 => initialize_xburn_pending(program_id, accounts, args),
         6 => add_pending_xburn(program_id, accounts, args),
         7 => mint_from_xburn(program_id, accounts, args),
+        8 => xburn(program_id, accounts, args),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -948,5 +949,71 @@ fn mint_from_xburn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -
     xp_ai.data.borrow_mut()[mint_offset + 32] = 1; // mark minted
 
     msg!("opaq: mint_from_xburn ok, leaf={}", leaf_index);
+    Ok(())
+}
+
+/// Phase 4 (P4.3, B.12.3/B.12.5): the SOURCE-side leg of a cross-chain move —
+/// Solana's own analog of `OpaqPool.xburn` (evm/src/OpaqPool.sol). Verifies
+/// the SAME xburn.nr proof `mint_from_xburn` verifies on a destination chain,
+/// but here Solana IS the source: checks `src_merkle_root` against Solana's
+/// OWN known-recent-root ring buffer, records `src_nullifier` in the SAME
+/// `NullifierSet` every other spend draws from (a nullifier is unique
+/// regardless of which instruction spent it), and inserts nothing / releases
+/// no SPL — the note is now claimable on the destination via this identical
+/// proof (mirrors `burn`'s shape exactly, just xburn.nr's 4 public inputs
+/// instead of burn.nr's 6). Added as a new instruction (tag 8) rather than
+/// migrating tag 4's `burn` in place, for the same reason P4.1 stayed
+/// additive (B.12.8's P4.1 scoping note): doesn't touch the already-working
+/// burn.nr/OpaqMint path.
+/// Accounts: [payer (signer,w), commitment_tree, nullifier_set (w), system_program]
+/// Args (256 + 4*32 = 384): proof_a(64) proof_b(128) proof_c(64)
+///             src_merkle_root(32) src_nullifier(32) dest_chain(32) out_commitment(32)
+#[inline(never)]
+fn xburn(program_id: &Pubkey, accounts: &[AccountInfo], args: &[u8]) -> ProgramResult {
+    if args.len() != 64 + 128 + 64 + 32 + 32 + 32 + 32 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let proof_a: [u8; 64] = args[0..64].try_into().unwrap();
+    let proof_b: [u8; 128] = args[64..192].try_into().unwrap();
+    let proof_c: [u8; 64] = args[192..256].try_into().unwrap();
+    let src_merkle_root: [u8; 32] = args[256..288].try_into().unwrap();
+    let src_nullifier: [u8; 32] = args[288..320].try_into().unwrap();
+    let dest_chain: [u8; 32] = args[320..352].try_into().unwrap();
+    let out_commitment: [u8; 32] = args[352..384].try_into().unwrap();
+
+    // Public inputs in circuit order (xburn.nr, B.12.2).
+    let public = [src_merkle_root, src_nullifier, dest_chain, out_commitment];
+    let mut verifier = Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public, &XBURN_VK)
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+    verifier
+        .verify()
+        .map_err(|_| ProgramError::Custom(E_PROOF_INVALID))?;
+
+    let iter = &mut accounts.iter();
+    let payer = next_account_info(iter)?;
+    let tree_ai = next_account_info(iter)?;
+    let nullifier_ai = next_account_info(iter)?;
+    let system = next_account_info(iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let (tree_pda, _) = Pubkey::find_program_address(&[TREE_SEED], program_id);
+    let (nf_pda, _) = Pubkey::find_program_address(&[NULLIFIER_SEED], program_id);
+    if tree_ai.key != &tree_pda || nullifier_ai.key != &nf_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    if !tree_is_known_root(&tree_ai.data.borrow(), &src_merkle_root) {
+        return Err(ProgramError::Custom(E_UNKNOWN_ROOT));
+    }
+    // Double-xburn check, then record the nullifier. No SPL release and no tree
+    // insert: the value is now claimable on the destination chain via the proof.
+    if nullifier_contains(&nullifier_ai.data.borrow(), &src_nullifier) {
+        return Err(ProgramError::Custom(E_ALREADY_SPENT));
+    }
+    nullifier_append(payer, nullifier_ai, system, src_nullifier)?;
+
+    msg!("opaq: xburn ok, dest_chain={}", chain_lo(&dest_chain));
     Ok(())
 }

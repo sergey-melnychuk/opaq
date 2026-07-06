@@ -234,6 +234,54 @@ fn main() {
     );
     fs::write(circuits_dir.join("xburn_values.json"), xburn_sidecar).unwrap();
 
+    // --- xburn2 (P4.3, m20 reverse leg): EVM note -> Solana note ---
+    // The SAME xburn.nr circuit, a second witness for the round trip's return
+    // leg. Its SOURCE note is the note the forward leg (above) just minted on
+    // the destination pool: dest_owner_pubkey/dest_blinding there are exactly
+    // this witness's src_spend_key/src_blinding (owner_pubkey = Poseidon(spend_key),
+    // so `dest_owner_pubkey == hash_1(848_484_848)` both name the same note).
+    // Its Merkle path is leaf 0 / all-left / zero-hash siblings — valid because
+    // OpaqPool.sol seeds from the SAME zero-hash table (B.12.9's parity gate)
+    // and the forward leg's mint is that pool's first-ever insert, so this is
+    // its real authentication path, not a stand-in.
+    let src_spend_key2 = be32(848_484_848); // == witness 1's dest_owner_pubkey's preimage
+    let src_blinding2 = dest_blinding; // == witness 1's dest_blinding (same note)
+    let src_owner2 = poseidon_be(&[src_spend_key2]);
+    debug_assert_eq!(src_owner2, dest_owner_pubkey, "xburn2's source note must be xburn's destination note");
+    let src_commitment2 = out_commitment; // the note the forward leg minted
+    let src_merkle_root2 = merkle_root_be(src_commitment2, &siblings, &right);
+    let src_nullifier2 = poseidon_be(&[src_commitment2, src_spend_key2]);
+    let dest_chain2 = be32(101); // SOLANA_CHAIN_ID (programs/opaq/src/lib.rs) — separate workspace, can't import it
+    let dest_owner_pubkey2 = poseidon_be(&[be32(909_090_909)]); // fresh, final Solana-side owner
+    let dest_blinding2 = be32(373_737_373);
+    let out_commitment2 = poseidon_be(&[token_id, amount, dest_owner_pubkey2, dest_blinding2]);
+
+    let xburn2_json = format!(
+        "{{\"src_merkle_root\":\"{}\",\"src_nullifier\":\"{}\",\"dest_chain\":\"{}\",\
+         \"out_commitment\":\"{}\",\"token_id\":\"{}\",\"amount\":\"{}\",\
+         \"src_spend_key\":\"{}\",\"src_blinding\":\"{}\",\
+         \"src_merkle_path\":[{}],\"src_merkle_path_indices\":[{}],\
+         \"dest_owner_pubkey\":\"{}\",\"dest_blinding\":\"{}\"}}",
+        field_hex(&src_merkle_root2), field_hex(&src_nullifier2), field_hex(&dest_chain2), field_hex(&out_commitment2),
+        field_hex(&token_id), field_hex(&amount), field_hex(&src_spend_key2), field_hex(&src_blinding2),
+        siblings.iter().map(|s| format!("\"{}\"", field_hex(s))).collect::<Vec<_>>().join(","),
+        right.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(","),
+        field_hex(&dest_owner_pubkey2), field_hex(&dest_blinding2),
+    );
+    fs::write(circuits_dir.join("xburn2_inputs.json"), &xburn2_json).unwrap();
+    println!("wrote {}", circuits_dir.join("xburn2_inputs.json").display());
+
+    let xburn2_sidecar = format!(
+        "{{\"src_commitment\":\"{}\",\"src_nullifier\":\"{}\",\"src_merkle_root\":\"{}\",\
+         \"dest_chain\":\"{}\",\"out_commitment\":\"{}\"}}\n",
+        hex::encode(src_commitment2),
+        hex::encode(src_nullifier2),
+        hex::encode(src_merkle_root2),
+        hex::encode(dest_chain2),
+        hex::encode(out_commitment2),
+    );
+    fs::write(circuits_dir.join("xburn2_values.json"), xburn2_sidecar).unwrap();
+
     // --- transfer/Prover.toml (Phase 2, P2.1): 2-in/2-out join-split ---
     // input[0]: the real note above (leaf 0, reusing the withdraw merkle setup).
     // input[1]: a dummy (amount 0). Split A into out[0]=B (to recipient) + out[1]=

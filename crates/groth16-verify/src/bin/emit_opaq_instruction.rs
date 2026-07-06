@@ -5,11 +5,14 @@
 //!   transfer (tag 3): proof… merkle_root(32) nullifier0(32) nullifier1(32) commitment0(32) commitment1(32)
 //!   mint_from_xburn (tag 7, circuit "xburn"): proof… src_merkle_root(32) src_nullifier(32)
 //!             dest_chain(32) out_commitment(32)
+//!   xburn (tag 8, circuit "xburn-source", Solana as SOURCE, P4.3): same 4 public
+//!             inputs as tag 7 — same circuit, different on-chain instruction/tag
+//!             depending on which role Solana plays in the cross-chain move.
 //!
-//! Usage: emit_opaq_instruction <deposit|withdraw|transfer|xburn> <proof_dir> <e2e_values.json> <out.bin>
-//! For transfer/xburn the sidecar arg is unused — their public inputs ARE the
-//! args, read straight from proof_dir/public.json (guaranteed to match what
-//! was proven).
+//! Usage: emit_opaq_instruction <deposit|withdraw|transfer|xburn|xburn-source> <proof_dir> <e2e_values.json> <out.bin>
+//! For transfer/xburn/xburn-source the sidecar arg is unused — their public
+//! inputs ARE the args, read straight from proof_dir/public.json (guaranteed
+//! to match what was proven).
 
 use std::{fs, path::PathBuf};
 
@@ -50,16 +53,22 @@ fn main() {
         return;
     }
 
-    // mint_from_xburn's args are exactly xburn.nr's 4 public inputs (B.12.2:
-    // src_merkle_root, src_nullifier, dest_chain, out_commitment) — same
-    // straight-from-public.json shape as transfer, tag 7 not 3.
-    if circuit == "xburn" {
+    // mint_from_xburn (tag 7) / xburn (tag 8, Solana as SOURCE, P4.3): both
+    // read the SAME xburn.nr 4 public inputs (B.12.2: src_merkle_root,
+    // src_nullifier, dest_chain, out_commitment) straight from public.json,
+    // same shape as transfer — only the leading tag byte differs by role.
+    let xburn_tag = match circuit {
+        "xburn" => Some(7u8),        // Solana as DESTINATION (mint_from_xburn)
+        "xburn-source" => Some(8u8), // Solana as SOURCE (xburn)
+        _ => None,
+    };
+    if let Some(tag) = xburn_tag {
         let public_json: Value =
             serde_json::from_str(&fs::read_to_string(proof_dir.join("public.json")).unwrap()).unwrap();
         let public = public_from_json(&public_json);
         assert_eq!(public.len(), 4, "xburn expects 4 public inputs, got {}", public.len());
         let mut data = Vec::with_capacity(1 + 256 + 4 * 32);
-        data.push(7u8);
+        data.push(tag);
         data.extend_from_slice(&p.a);
         data.extend_from_slice(&p.b);
         data.extend_from_slice(&p.c);
