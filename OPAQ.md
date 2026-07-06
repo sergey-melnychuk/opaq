@@ -137,14 +137,30 @@ Goal: burn a note on Solana, mint the equivalent asset on an EVM chain, proof-ga
 
 **Key invariant:** the same nullifier must be checked on both chains independently — burning on Solana and minting on EVM are two separate proof verifications, not one shared state, since the chains don't share a state root.
 
-**Phase 4 — Symmetric Cross-Chain Shielded Bridge + Advanced Features**
-- **Reverse direction as a symmetric bridge (fully spec'd — see B.12):** make the
-  EVM side a full shielded pool (Tornado-style Poseidon Merkle tree + nullifier
-  set) so cross-chain movement is a private note-burn on the source → note-mint
-  (re-shield) on the destination — one Groth16 proof verified on the destination,
-  identical machinery both ways. Supersedes the `OpaqMint` balance ledger.
+**Phase 4 — Symmetric Cross-Chain Shielded Bridge + Advanced Features. DONE (P4.0–P4.3, m19/m20).**
+- **Reverse direction as a symmetric bridge (spec'd in B.12, built and live-verified):**
+  the EVM side (`OpaqPool.sol`) is a full shielded pool (Poseidon Merkle tree +
+  nullifier set) so cross-chain movement is a private note-burn on the source →
+  note-mint (re-shield) on the destination — one Groth16 proof verified on the
+  destination, identical machinery both ways. Supersedes the `OpaqMint` balance
+  ledger. Live round trip (Solana → EVM → Solana) verified by m20.
 - Lending / advanced (exploratory, not scoped): shielded collateral (prove note
   ownership to back a loan); private interest accrual (time-locked notes).
+
+**Phase 5 — Bridge Attestation Trust Reduction (ICP Canister Operator, A.9 rung 2)**
+Phase 3/4's bridge is fully built but its attestation is a single semi-trusted
+`operator` key (A.9 rung 1) — sound as a research prototype, not as
+infrastructure: that key can mint unbacked value by attesting a nullifier for
+a note that was never actually locked on the source chain (B.14 spells this
+out). Phase 5 replaces the human key with an ICP canister holding threshold-
+signing keys that watches both chains via redundant, independently-agreeing
+RPC providers and attests only what a quorum of them confirms — fully spec'd
+in B.14, not yet built. Rungs 3 (in-canister Solana light client) and 4 (light
+clients on both L1s, no third chain) are explicitly out of scope: 3's added
+implementation risk (bespoke, unaudited consensus-verification code) is judged
+not worth its marginal trust reduction over 2, and 4 is not currently tractable
+(verifying Solana's stake-weighted consensus on the EVM is prohibitively
+expensive) — see B.14's risk notes.
 
 ### A.7 Critical Integration Risk: Poseidon Variant Mismatch
 
@@ -1499,3 +1515,177 @@ built, not part of this section's scope.
   out-of-band info, runs `opaq list-unspent`, discovers exactly the one note
   sent to him, and withdraws it — funds land, vault balance matches. B.11
   item #4 is closed.
+
+### B.14 ICP Attestation Canister — Bridge Trust Reduction (Phase 5, A.9 rung 2)
+
+**Why this rung, and not 1, 3, or 4.** A.9 already lays out the ladder; this
+section is the build-ready spec for the one rung actually worth building next.
+
+Rung 1 (what's shipped, both `OpaqMint`/`OpaqPool.addPending` and
+`add_pending_xburn`) is not "one operator might be dishonest" in the abstract
+— it's a concrete counterfeiting bug waiting for a careless or malicious key
+holder: **`addPending`/`add_pending_xburn` take a bare nullifier with no proof
+that a corresponding `xburn`/`burn` was ever recorded on the source chain.**
+If the operator attests a nullifier belonging to a note that is still live and
+unspent on the source chain, whoever holds that note's `spend_key` can mint
+the destination copy while the original stays fully spendable at home —
+**value created without ever being locked**, silent, repeatable, and requiring
+no prior bridge balance to exploit. That is the actual residual risk rung 1
+carries, not just "trust one person's honesty" in the abstract.
+
+Rung 3 (in-canister Solana consensus verification) and rung 4 (mutual
+on-chain light clients) are explicitly **out of scope** for this phase: rung 3
+trades a well-understood, diversifiable risk (RPC-provider collusion) for a
+large amount of novel, unaudited consensus-verification code — a bespoke
+Solana light client is close to unprecedented in production and the
+trust it buys over rung 2 (removing RPC honesty, while still trusting the ICP
+subnet either way) doesn't obviously outweigh the new attack surface. Rung 4
+requires verifying Solana's stake-weighted validator signatures inside an EVM
+contract, which is not economically tractable today. Rung 2 is where the
+architecture the wider industry has actually converged on for cross-chain
+attestation lives (Wormhole's guardian set, Axelar's validators, LayerZero's
+DVNs — all fundamentally "N independent parties observe chain state and reach
+threshold agreement," not full light clients) — a real, scoped, buildable
+project rather than either a rubber stamp or a research problem.
+
+**B.14.1 What changes, what doesn't.** Per A.9's own note, this is a
+*deployment-config* change, not a contract rewrite: `operator` is already just
+an `address` on `OpaqPool.sol` / `OpaqMint.sol` and a `Pubkey` in
+`XburnPending` (`programs/opaq/src/lib.rs`). Pointing either at a canister's
+threshold-derived address requires zero changes to any already-shipped,
+already-tested contract or program code. Everything in this section is new
+code living entirely off-chain (in the canister) — `add_pending_xburn` and
+`OpaqPool.addPending` keep their exact current signatures.
+
+**B.14.2 The core design point: what "N RPC nodes" actually has to mean.**
+ICP's HTTPS outcalls feature has its own, narrower built-in consensus: replica
+nodes *within the same subnet* independently make the identical HTTP request
+and must get byte-identical responses (via a required `transform` function
+that strips non-deterministic fields like timestamps) or the call traps. That
+protects against **one dishonest replica node** lying about what it received
+— it does **not**, by itself, protect against **one dishonest/compromised RPC
+provider**, since if every subnet node queries the *same* single provider URL,
+they'll all faithfully agree on whatever that one provider said, true or not.
+
+The property the trust argument actually needs — resilience to one bad RPC
+*provider*, not just one bad replica — has to be built explicitly in canister
+logic:
+
+1. For each attestation, issue **independent outcalls to ≥3 distinct,
+   independently-operated RPC providers** per chain (e.g. Solana: a public
+   cluster RPC + two of {Triton, Helius, QuickNode}; EVM: a public RPC + two
+   of {Alchemy, Infura, a public gateway}). Each individual outcall still goes
+   through ICP's own replica-level consensus — protects against a lying node.
+2. The canister's application logic then requires **≥2-of-3 (configurable)
+   provider responses to agree** on the fact being attested (a specific
+   nullifier recorded, at a specific slot/block, with sufficient
+   confirmations) before proceeding — protects against a lying/compromised
+   *provider*.
+3. Only after both layers agree does the canister sign and submit.
+
+This two-layer structure — replica consensus *and* cross-provider agreement —
+is the actual content of "trust N RPC nodes, which is how blockchain
+interaction already works," made precise enough to build and audit.
+
+**B.14.3 Finality/reorg handling.** Attesting before a block/slot is truly
+final risks locking in a fact that gets reorged out from under it. Query with
+the strictest available commitment level (`finalized` on Solana, not
+`confirmed`) and additionally require a configurable minimum confirmation
+depth on the EVM side (N blocks past the reported head) before treating a
+burn as attestable. This is a parameter (`MIN_CONFIRMATIONS`), not a hardcoded
+constant — tune per deployment (devnet vs. mainnet finality economics differ).
+
+**B.14.4 Threshold signing (both directions, symmetric).** The canister signs
+and submits **only the attestation** (`addPending`/`add_pending_xburn(nullifier)`)
+— never a mint. It doesn't need to, and structurally cannot, construct a mint
+transaction: `token_id`/`amount`/destination are private circuit witnesses,
+never public on the source chain, so the canister never observes them (B.14
+above). The actual mint (`mintFromXburn`/`mint_from_xburn`, carrying the full
+proof) is submitted separately and self-served by the note owner or anyone
+they hand the proof to — exactly the existing "no relayer" pattern
+(`evm/mint.mjs`, `opaq burn --submit`). This split is what keeps the canister
+from ever being a privacy leak: it attests a boolean about a nullifier it
+can already see in the clear (nullifiers are public by design, same as
+today's rung-1 operator sees), nothing more.
+- **EVM-side operator** (attesting Solana→EVM burns, today's direction):
+  ICP's threshold-ECDSA (`sign_with_ecdsa` management-canister API) derives a
+  secp256k1 public key — an Ethereum address — with the private key never
+  materialized on any single node; signing is a threshold protocol across the
+  subnet. The canister builds and signs the `addPending` call itself, then
+  submits via an outcall (`eth_sendRawTransaction`) to an EVM RPC.
+- **Solana-side operator** (attesting EVM→Solana burns, the reverse
+  direction, B.12.3): ICP's threshold Ed25519/Schnorr signing API derives a
+  Solana keypair's public key the same way, symmetric to the EVM case —
+  signing and submitting only `add_pending_xburn`.
+- **Operational cost, not a cryptographic one:** the canister needs its own
+  ETH (gas) and SOL (fees) balances to submit these transactions, and ICP
+  cycles to run — a real, ongoing liveness dependency (someone has to keep it
+  funded), distinct from and much smaller than rung 1's trust dependency, but
+  worth naming rather than pretending rung 2 has zero operational trust left.
+
+**B.14.5 Canister state (persisted in stable memory, survives upgrades).**
+```
+- per direction (Solana->EVM, EVM->Solana):
+    last_processed_slot_or_block: u64   // watermark, avoid re-scanning from genesis
+    attested_nullifiers: Set<[u8; 32]>  // idempotency — never attest twice
+- config (settable by canister controller, not by the attestation logic itself):
+    rpc_providers: [Url; >=3] per chain
+    agreement_threshold: u8             // e.g. 2 of 3
+    min_confirmations: u64              // per chain
+    target_contract_addrs: { evm: Address, solana: Pubkey }
+```
+
+**B.14.6 Build phases (P5, mirrors P2/P3/P4's style).**
+- **P5.0 — canister scaffold.** `dfx` project, `ic-cdk` Rust canister, derive
+  a threshold-ECDSA EVM address + threshold-Ed25519 Solana address on local
+  replica (`dfx start`). *Accept:* canister produces a valid signature over a
+  known message for both key types; recovered address/pubkey matches what the
+  management canister reports.
+- **P5.1 — single-provider outcall + transform.** Fetch a specific Solana
+  transaction/account via one RPC provider, with a `transform` function
+  making the response deterministic across replicas. *Accept:* outcall
+  succeeds identically across repeated calls; a response containing a
+  non-deterministic field (e.g. a server timestamp) is correctly stripped
+  before the replica-consensus comparison.
+- **P5.2 — multi-provider agreement.** Query ≥3 distinct providers, implement
+  the ≥2-of-3 agreement check. *Accept:* agreeing providers -> proceeds;
+  disagreement (simulate via a provider returning stale/wrong data) ->
+  rejects/retries, does not attest.
+- **P5.3 — finality gating.** Enforce `MIN_CONFIRMATIONS` / `finalized`
+  commitment before treating a burn as attestable. *Accept:* a burn below the
+  confirmation threshold is not yet attestable; once past it, is.
+- **P5.4 — end-to-end attestation, one direction.** Canister observes a REAL
+  `xburn` nullifier on a public Solana **devnet** (outcalls need real
+  reachable HTTPS endpoints — this is the one milestone class in the whole
+  project that can't run against a purely local validator, unlike every
+  m-numbered test so far) meeting finality, threshold-signs and submits
+  `add_pending_xburn`/`addPending` itself on an EVM **testnet**. *Accept:*
+  the attestation lands with no human signing anything; a subsequent mint
+  using that attestation succeeds.
+- **P5.5 — reverse direction.** Same, EVM testnet -> Solana devnet, using the
+  threshold-Ed25519 key. Symmetric per B.12.3.
+- **P5.6 — operational hardening.** Cycles-balance + gas/fee-balance
+  monitoring and alerting; canister-upgrade-safe stable-memory migration for
+  the state in B.14.5; a runbook for topping up funding. Not a cryptographic
+  milestone, but a real prerequisite for anything long-running.
+
+**B.14.7 Open risks / honest caveats.**
+- **Can't be tested fully locally.** Every milestone so far in this project
+  (M0–M21) ran end-to-end against a local `solana-test-validator` + `anvil`,
+  fast and fully reproducible. P5.4/P5.5 need public devnet/testnet endpoints
+  reachable from ICP's boundary nodes — slower, less controllable, and this
+  spec should not pretend otherwise.
+- **Determinism is a real, fiddly constraint.** Picking RPC methods/providers
+  whose responses are byte-identical across independent queries (same JSON
+  key ordering, no embedded server timestamps) needs actual verification per
+  provider, not an assumption.
+- **This is a different technology stack** (Internet Computer, `ic-cdk`,
+  `dfx`, cycles economics) with its own security model and learning curve —
+  a materially bigger lift than anything built in Phases 1–4, which all
+  stayed within Solana/EVM/Noir tooling already in hand.
+- **Audit still required.** Adopting the right trust *model* (rung 2) doesn't
+  make the *implementation* of it correct for free — the agreement-threshold
+  logic, finality gating, and key-management code are exactly the kind of
+  soundness-critical surface that needs the same external-audit treatment
+  already flagged as an outstanding blocker for the rest of the protocol
+  (B.11 item #2).
