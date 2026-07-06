@@ -32,36 +32,49 @@ contract OpaqMintTest {
         bytes32 nf = bytes32(sig[1]);
         bytes32 tokenId = bytes32(sig[2]);
         uint256 amount = sig[3];
+        uint256 destChain = sig[4];
         address to = address(uint160(sig[5]));
 
         // (1) sanity: the verifier accepts the real proof.
         require(mintc.verifier().verifyProof(a, b, c, sig), "verifier rejected a valid proof");
 
         // (2) mint before the operator mirrors the burn -> rejected (not pending).
-        vm.expectRevert(bytes("not pending / already minted"));
+        vm.expectRevert(bytes("not pending / wrong destination"));
         mintc.mint(a, b, c, sig);
 
-        // (3) operator mirrors the Solana burn, then mint succeeds and credits dest.
+        // (3) operator mirrors the Solana burn, binding the exact
+        // (tokenId, amount, destChain, destAddress) tuple (B.12.5's fix,
+        // ported here after finding the identical gap in OpaqPool.sol).
         vm.prank(OPERATOR);
-        mintc.addPending(nf);
+        mintc.addPending(nf, tokenId, amount, destChain, to);
+
+        // (3b) a proof claiming the right nullifier but a DIFFERENT
+        // dest_address than what was attested -> rejected. Bare nullifier
+        // tracking (the original design) would have let this through.
+        uint[6] memory tampered = [sig[0], sig[1], sig[2], sig[3], sig[4], uint256(uint160(to)) ^ 1];
+        vm.expectRevert(bytes("not pending / wrong destination"));
+        mintc.mint(a, b, c, tampered);
+
+        // (4) matching tuple -> mint succeeds and credits dest.
         mintc.mint(a, b, c, sig);
         require(mintc.balanceOf(tokenId, to) == amount, "mint did not credit dest_address");
         require(mintc.minted(nf), "nullifier not marked minted");
-        require(!mintc.pendingMint(nf), "pending not consumed");
+        require(mintc.pendingMint(nf) == bytes32(0), "pending not consumed");
 
-        // (4) double-mint -> rejected (permanent guard).
-        vm.expectRevert(bytes("not pending / already minted"));
+        // (5) double-mint -> rejected (permanent guard; checked before the
+        // pending/tuple check, since pendingMint was already deleted above).
+        vm.expectRevert(bytes("already minted"));
         mintc.mint(a, b, c, sig);
 
-        // (5) operator re-adds a consumed nullifier -> rejected (can't resurrect).
+        // (6) operator re-adds a consumed nullifier -> rejected (can't resurrect).
         vm.prank(OPERATOR);
         vm.expectRevert(bytes("already minted"));
-        mintc.addPending(nf);
+        mintc.addPending(nf, tokenId, amount, destChain, to);
     }
 
     function test_onlyOperatorCanAddPending() public {
         bytes32 nf = bytes32(uint256(0x1234));
         vm.expectRevert(bytes("not operator"));
-        mintc.addPending(nf);
+        mintc.addPending(nf, bytes32(uint256(1)), 1, 1, address(0xBEEF));
     }
 }

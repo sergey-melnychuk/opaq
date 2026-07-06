@@ -34,13 +34,22 @@ contract OpaqMint {
     IGroth16Verifier public immutable verifier;
     address public operator;
 
-    mapping(bytes32 => bool) public pendingMint; // operator-mirrored, awaiting mint
+    // operator-mirrored, awaiting mint: nullifier => hash of the SPECIFIC
+    // (tokenId, amount, destChain, destAddress) attested, 0 = not pending.
+    // A bare bool here (the original design) would let mint() accept ANY
+    // proof sharing this nullifier, not just the one actually attested —
+    // dest_chain/dest_address are free choices at proof-generation time,
+    // unconstrained by the note itself, so a bare flag can't tell which
+    // destination was really burned for (same gap found + fixed in
+    // OpaqPool.sol while scoping the ICP attestor, see OPAQ.md B.14.7 — this
+    // contract had the identical bug, unnoticed until re-checked directly).
+    mapping(bytes32 => bytes32) public pendingMint;
     mapping(bytes32 => bool) public minted; // permanent double-mint guard
     // Demo asset ledger: token_id => holder => amount (a real deployment would
     // mint a per-token_id ERC-20; kept self-contained here).
     mapping(bytes32 => mapping(address => uint256)) public balanceOf;
 
-    event PendingAdded(bytes32 indexed nullifier);
+    event PendingAdded(bytes32 indexed nullifier, bytes32 tokenId, uint256 amount, uint256 destChain, address destAddress);
     event Minted(bytes32 indexed nullifier, bytes32 indexed tokenId, address indexed to, uint256 amount);
 
     modifier onlyOperator() {
@@ -53,12 +62,18 @@ contract OpaqMint {
         operator = _operator;
     }
 
-    /// Operator mirrors a FINALIZED Solana burn. Refuses to resurrect a consumed
-    /// nullifier, so a re-add can never enable a second mint.
-    function addPending(bytes32 nullifier) external onlyOperator {
+    /// Operator mirrors a FINALIZED Solana burn, binding the SPECIFIC
+    /// (tokenId, amount, destChain, destAddress) tuple attested — not just
+    /// the nullifier, see the `pendingMint` doc comment. Refuses to
+    /// resurrect a consumed nullifier, so a re-add can never enable a
+    /// second mint.
+    function addPending(bytes32 nullifier, bytes32 tokenId, uint256 amount, uint256 destChain, address destAddress)
+        external
+        onlyOperator
+    {
         require(!minted[nullifier], "already minted");
-        pendingMint[nullifier] = true;
-        emit PendingAdded(nullifier);
+        pendingMint[nullifier] = keccak256(abi.encode(tokenId, amount, destChain, destAddress));
+        emit PendingAdded(nullifier, tokenId, amount, destChain, destAddress);
     }
 
     /// Mint the burned note's EVM counterpart. Anyone can submit, but only the
@@ -70,13 +85,18 @@ contract OpaqMint {
         uint[6] calldata signals
     ) external {
         bytes32 nullifier = bytes32(signals[1]);
-        require(pendingMint[nullifier] && !minted[nullifier], "not pending / already minted");
-        require(signals[4] == block.chainid, "wrong dest chain");
-        require(verifier.verifyProof(a, b, c, signals), "bad proof");
-
+        require(!minted[nullifier], "already minted");
+        // Check `minted` first: once consumed, pendingMint[nullifier] is
+        // deleted, so a stale re-submission must fail as "already minted",
+        // not fall through to "not pending" — order matters here.
         bytes32 tokenId = bytes32(signals[2]);
         uint256 amount = signals[3];
+        uint256 destChain = signals[4];
         address to = address(uint160(signals[5])); // dest_address field -> 20-byte addr
+        bytes32 expected = keccak256(abi.encode(tokenId, amount, destChain, to));
+        require(pendingMint[nullifier] == expected && expected != bytes32(0), "not pending / wrong destination");
+        require(destChain == block.chainid, "wrong dest chain");
+        require(verifier.verifyProof(a, b, c, signals), "bad proof");
 
         minted[nullifier] = true; // permanent guard
         delete pendingMint[nullifier]; // consume (gas refund + accurate outstanding set)

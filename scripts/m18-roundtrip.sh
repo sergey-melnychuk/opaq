@@ -92,16 +92,17 @@ OPAQ_ROOT="$ROOT" \
 node "$ROOT/tests/m18_roundtrip.mjs" "$PROG_KP" "$WORK/mint.json" "$OPAQ" "$PROOFDIR" "$CHAIN_ID" "$DEST_ADDR"
 
 # From the burn's public inputs [merkle_root, nullifier, token_id, amount, dest_chain, dest_address]:
-read -r NULLIFIER TOKEN_ID AMOUNT TO < <(node -e '
+read -r NULLIFIER TOKEN_ID AMOUNT DEST_CHAIN TO < <(node -e '
   const fs=require("fs");
   const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
   const h=x=>"0x"+BigInt(x).toString(16).padStart(64,"0");
   const to="0x"+(BigInt(s[5])&((1n<<160n)-1n)).toString(16).padStart(40,"0");
-  console.log([h(s[1]),h(s[2]),s[3],to].join(" "));
+  console.log([h(s[1]),h(s[2]),s[3],s[4],to].join(" "));
 ' "$PROOFDIR/public.json")
 
-echo "==> EVM side: operator addPending -> owner mints the SAME proof (self-served)"
-cast send "$MINT" "addPending(bytes32)" "$NULLIFIER" --rpc-url "$EVM_RPC" --private-key "$OP_KEY" >/dev/null
+echo "==> EVM side: operator addPending (binding the full attested tuple — B.12.5) -> owner mints the SAME proof (self-served)"
+cast send "$MINT" "addPending(bytes32,bytes32,uint256,uint256,address)" \
+  "$NULLIFIER" "$TOKEN_ID" "$AMOUNT" "$DEST_CHAIN" "$TO" --rpc-url "$EVM_RPC" --private-key "$OP_KEY" >/dev/null
 TXH=$(node "$EVM/mint.mjs" "$EVM_RPC" "$MINT" "$USER_KEY" "$PROOFDIR/public.json" "$PROOFDIR/proof.json")
 echo "  mint tx $TXH"
 

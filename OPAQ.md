@@ -1106,6 +1106,22 @@ ceremony tooling end-to-end). The **self-served drive is now built (P3.2–P3.5)
 EVM mint from the same burn proof (m17) — no relayer, both verified live. Remaining:
 the `addPending` attestation (A.9 ladder) and the reverse direction (EVM→Solana).
 
+**[x] Hardened (found + fixed after the fact):** `OpaqMint.sol`'s
+`pendingMint` originally tracked only a bare nullifier (`mapping(bytes32 =>
+bool)`) — the identical gap found and fixed in `OpaqPool.sol` while scoping
+the Phase 5 ICP attestor (B.14.7), missed here initially because this
+contract predates that scoping work. `dest_chain`/`dest_address` are free
+choices at proof-generation time (unconstrained by the note itself, same as
+`OpaqPool`'s `dest_chain`/`out_commitment`), so a bare flag couldn't tell
+which destination was actually attested. Fixed the same way: `addPending`
+now takes `(nullifier, tokenId, amount, destChain, destAddress)` and stores
+`keccak256(abi.encode(...))` of the full tuple; `mint` checks the submitted
+proof's own signals hash to the stored value. `evm/test/OpaqMint.t.sol`
+gained the same tampered-destination regression case as `OpaqPool.t.sol`.
+Re-verified live: **m17** and **m18** (`scripts/m17-evm-mint-e2e.sh`,
+`scripts/m18-roundtrip.sh`) both re-ran end to end with the fix in the
+critical path.
+
 **Trust model — see the A.9 ladder.** The EVM mint does NOT need to validate the
 Solana root: the Solana `burn` instruction already enforced a valid root before
 recording the nullifier, so mirroring Solana's **burned-nullifier set** (not
@@ -1831,3 +1847,12 @@ agreement or finality logic built from scratch.
   now store a hash of the attested tuple and `mint_from_xburn`/
   `mintFromXburn` check the submitted proof's own public inputs against it.
   M19/M20 re-verified live with the fix in the critical path.
+
+  **Follow-up check that paid off:** re-examining `OpaqMint.sol` (Phase 3's
+  original balance-ledger contract, predating this fix and left untouched
+  by the P4.1 "additive, don't touch the working path" scoping decision)
+  turned up the *identical* bug, live and unfixed, in already-shipped code
+  exercised by m14–m18 — see B.11 item #6. Fixed the same way and
+  re-verified live (m17/m18). Worth naming as a lesson: finding and fixing
+  a bug class in the new code doesn't mean checking whether the old code
+  has the same one — that check has to happen explicitly.

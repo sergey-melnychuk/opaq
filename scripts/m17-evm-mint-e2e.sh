@@ -57,17 +57,18 @@ MINT=$(forge_deploy "src/OpaqMint.sol:OpaqMint" --constructor-args "$VERIFIER" "
 echo "  verifier=$VERIFIER  opaqMint=$MINT"
 
 # public.json = [merkle_root, nullifier, token_id, amount, dest_chain, dest_address] (decimal strings).
-read -r NULLIFIER TOKEN_ID AMOUNT TO < <(node -e '
+read -r NULLIFIER TOKEN_ID AMOUNT DEST_CHAIN TO < <(node -e '
   const fs=require("fs");
   const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
   const h=x=>"0x"+BigInt(x).toString(16).padStart(64,"0");
   const to="0x"+(BigInt(s[5])&((1n<<160n)-1n)).toString(16).padStart(40,"0");
-  console.log([h(s[1]),h(s[2]),s[3],to].join(" "));
+  console.log([h(s[1]),h(s[2]),s[3],s[4],to].join(" "));
 ' "$PUB")
-echo "  nullifier=$NULLIFIER  token=$TOKEN_ID  amount=$AMOUNT  to=$TO"
+echo "  nullifier=$NULLIFIER  token=$TOKEN_ID  amount=$AMOUNT  dest_chain=$DEST_CHAIN  to=$TO"
 
-echo "==> operator mirrors the burned nullifier (addPending)"
-cast send "$MINT" "addPending(bytes32)" "$NULLIFIER" --rpc-url "$RPC" --private-key "$OP_KEY" >/dev/null
+echo "==> operator mirrors the burned nullifier (addPending, binding the full attested tuple — B.12.5)"
+cast send "$MINT" "addPending(bytes32,bytes32,uint256,uint256,address)" \
+  "$NULLIFIER" "$TOKEN_ID" "$AMOUNT" "$DEST_CHAIN" "$TO" --rpc-url "$RPC" --private-key "$OP_KEY" >/dev/null
 
 echo "==> note owner mints SELF-SERVED (evm/mint.mjs, no relayer)"
 TXH=$(node "$EVM/mint.mjs" "$RPC" "$MINT" "$USER_KEY" "$PUB" "$PROOF")
