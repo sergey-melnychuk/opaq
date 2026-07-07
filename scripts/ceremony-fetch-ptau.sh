@@ -2,22 +2,27 @@
 # Ceremony PHASE 1 (reuse, not generate). Powers-of-Tau is universal — circuit-
 # independent — so instead of running our own multi-party phase-1 we reuse the
 # Perpetual Powers of Tau (Polygon Hermez snapshot), a large, well-attended BN254
-# ceremony already finalized with a public beacon. We need <= 2^16 constraints
-# (withdraw=16 ⊇ deposit=14), so power 16 (64k) suffices for both circuits.
+# ceremony already finalized with a public beacon. Power defaults to 16 (64k
+# constraints — covers deposit=14, withdraw=16, burn=16, xburn=16); transfer
+# needs power 17 (128k), passed as the second arg.
 #
 # This script downloads the file (if absent), verifies its published blake2b-512
 # hash (provenance), and runs `snarkjs powersoftau verify` (cryptographic check
 # that the whole contribution chain is a valid PoT). Either gate failing aborts.
 #
-# Usage: ceremony-fetch-ptau.sh [out_ptau_path]
+# Usage: ceremony-fetch-ptau.sh [out_ptau_path] [power]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-POWER=16
+POWER="${2:-16}"
 FILE="powersOfTau28_hez_final_${POWER}.ptau"
 URL="https://storage.googleapis.com/zkevm/ptau/${FILE}"
-# Published blake2b-512 of the power-16 file (snarkjs README / zkevm ptau bucket).
-EXPECTED_B2="6a6277a2f74e1073601b4f9fed6e1e55226917efb0f0db8a07d98ab01df1ccf43eb0e8c3159432acd4960e2f29fe84a4198501fa54c8dad9e43297453efec125"
+# Published blake2b-512 hashes (snarkjs README's ptau table / zkevm ptau bucket).
+case "$POWER" in
+  16) EXPECTED_B2="6a6277a2f74e1073601b4f9fed6e1e55226917efb0f0db8a07d98ab01df1ccf43eb0e8c3159432acd4960e2f29fe84a4198501fa54c8dad9e43297453efec125" ;;
+  17) EXPECTED_B2="6247a3433948b35fbfae414fa5a9355bfb45f56efa7ab4929e669264a0258976741dfbe3288bfb49828e5df02c2e633df38d2245e30162ae7e3bcca5b8b49345" ;;
+  *) echo "no pinned hash for power $POWER — add one from snarkjs's ptau table before using it" >&2; exit 1 ;;
+esac
 
 OUT="${1:-$ROOT/ceremony/.cache/$FILE}"
 mkdir -p "$(dirname "$OUT")"

@@ -1,20 +1,37 @@
 #!/usr/bin/env bash
 # Independently re-verify a finished ceremony from its artifacts. Anyone can run
-# this against the published ptau + per-circuit work dirs to confirm:
-#   - the phase-1 ptau is a valid Powers-of-Tau chain
+# this against the per-circuit work dirs to confirm:
+#   - each work dir's phase-1 ptau (whichever power it actually used — deposit/
+#     withdraw/burn/xburn use power 16, transfer needs power 17, ceremony.sh
+#     records which in <work>/ptau.path) is a valid Powers-of-Tau chain
 #   - each circuit's final zkey is a valid phase-2 of that ptau for that R1CS
 #   - the embedded VK matches the final zkey
 #
-# Usage: ceremony-verify.sh <ptau> <deposit_work> <withdraw_work>
+# Usage: ceremony-verify.sh <circuit1:work_dir1> [<circuit2:work_dir2> ...]
+#   e.g. ceremony-verify.sh deposit:ceremony/work/deposit withdraw:ceremony/work/withdraw
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PTAU="$1"; DEP="$2"; WIT="$3"
+PROG="$ROOT/programs/opaq"
 
-echo "==> phase-1: powersoftau verify"
-snarkjs powersoftau verify "$PTAU"
+[ $# -ge 1 ] || { echo "usage: ceremony-verify.sh <circuit:work_dir> ..." >&2; exit 1; }
+
+SEEN_PTAU=""  # space-separated list of already-verified ptau paths (bash 3.2 has no assoc arrays)
+for pair in "$@"; do
+  work="${pair#*:}"
+  ptau="$(cat "$work/ptau.path")"
+  case " $SEEN_PTAU " in
+    *" $ptau "*) ;;
+    *)
+      echo "==> phase-1 ($ptau): powersoftau verify"
+      snarkjs powersoftau verify "$ptau"
+      SEEN_PTAU="$SEEN_PTAU $ptau"
+      ;;
+  esac
+done
 
 verify_circuit() {
   local WORK="$1" C; C="$(cat "$WORK/circuit.name")"
+  local PTAU; PTAU="$(cat "$WORK/ptau.path")"
   echo "==> phase-2 ($C): zkey verify"
   snarkjs zkey verify "$WORK/circuit.r1cs" "$PTAU" "$WORK/final.zkey"
   echo "==> phase-2 ($C): embedded VK matches final.zkey"
@@ -32,6 +49,7 @@ verify_circuit() {
   ' "$WORK/vk_check.json" "$WORK/verification_key.json" "$C"
 }
 
-verify_circuit "$DEP"
-verify_circuit "$WIT"
+for pair in "$@"; do
+  verify_circuit "${pair#*:}"
+done
 echo "ceremony verification PASSED"

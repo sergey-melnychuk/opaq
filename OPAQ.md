@@ -766,6 +766,49 @@ syscalls. **M3 done** (modulo the insecure ceremony below). The hand-built
 UltraHonk verifier B.6 originally feared is moot — Groth16 verification is the
 audited `groth16-solana` crate, no pairing math hand-rolled.
 
+**What "toxic waste" actually is, and why one honest deletion is enough
+(read this before the caveat below).** Groth16's trusted setup builds the
+proving/verifying key pair from secret random field elements (conventionally
+τ/α/β/γ/δ — the exact set depends on the scheme). These secrets are needed
+only to construct the setup; a real prover never needs them again. But
+whoever *knows* them can work backward and construct a proof that verifies
+for a **false** statement — indistinguishable on-chain from a real one. That
+is the entire risk: "toxic waste" is the literal secret that breaks
+soundness if it survives anywhere, not a metaphor for "sloppy code."
+
+A multi-party ceremony needs only **one** honest participant because of how
+contributions compose: each party takes the current accumulated secret,
+multiplies in their own freshly-generated randomness, passes the result
+along, then deletes their own piece. The final secret is the product of
+every contributor's piece. As long as *at least one* piece was genuinely
+never persisted anywhere — not written to disk, not left in process memory,
+not logged — nobody can reconstruct the final secret afterward, even by
+later compromising every other contributor's machine, because reconstructing
+it needs *all* the pieces and one is provably gone. That's the actual
+security bar: 1-of-n honesty, not unanimity.
+
+Why a *trivial* ceremony (no contribution, or fixed-string entropy) is
+catastrophic rather than merely weak: if the entropy is a hardcoded string —
+which is exactly what `scripts/groth16-setup.sh` uses today
+(`-e="opaq deterministic entropy"`) — the toxic waste isn't hard to guess,
+it's **published in this repository**. Anyone who clones it can recompute
+the exact secret and forge arbitrary proofs; no cryptographic effort
+required, just reading the source.
+
+Why a drand beacon (used by the ceremony tooling just below, and in
+`ceremony/README.md`) helps even for a single operator, and why it still
+isn't sufficient alone: mixing in a public randomness beacon as the *final*
+step — a value nobody, including the operator, could predict at contribution
+time, since it's published by an independent network after contributions
+finish — proves the operator couldn't have steered the final key toward a
+chosen backdoor. It does **not** prove the operator genuinely destroyed
+their *own* earlier-round randomness rather than retaining it — that's
+fundamentally unverifiable from outside a single-operator process. That's
+exactly why a solo ceremony run, even done properly with real entropy and a
+real beacon, is honestly labeled "not trustworthy for real funds" rather
+than treated as equivalent to a genuine multi-party run (`ceremony/
+README.md`'s own framing).
+
 > **SECURITY CAVEAT — insecure proving ceremony.** `scripts/groth16-prove.sh`
 > (via the upstream `run_circuit.sh`) generates powers-of-tau with **no
 > contribution** — trivial toxic waste, so the resulting vk is degenerate
@@ -775,14 +818,25 @@ audited `groth16-solana` crate, no pairing math hand-rolled.
 > `IC` points are an artifact of the trivial setup, not a circuit bug — a proper
 > ceremony yields non-degenerate `IC` that bind every public input.
 >
-> **Ceremony tooling now exists** (`ceremony/`, `scripts/ceremony-*.sh`): it
-> reuses the Perpetual Powers of Tau (Hermez power-16) for the universal phase-1
-> and runs a per-circuit phase-2 (multi-contribution + drand beacon + verify) for
-> `deposit`/`withdraw`, re-embedding the VKs via `emit_artifacts --real`. The
-> `--smoke` profile is verified end-to-end (produces verifying proofs), but a
-> trustworthy run still requires **independent contributors + a pinned beacon** —
-> the social step the scripts can't supply. See `ceremony/README.md`. The embedded
-> VKs remain the insecure test ones until that real run happens.
+> **Ceremony tooling exists and now covers all 5 circuits** (`ceremony/`,
+> `scripts/ceremony-*.sh`): it reuses the Perpetual Powers of Tau (Hermez,
+> power 16 for `deposit`/`withdraw`/`burn`/`xburn`, power 17 for `transfer`)
+> for the universal phase-1 and runs a per-circuit phase-2 (multi-contribution
+> + drand beacon + verify) for every circuit, re-embedding the VKs via
+> `emit_artifacts --real`. `scripts/ceremony.sh --smoke` has been **run for
+> real** (not just tooling-verified) — `programs/opaq/src/vk_*.rs` for all 5
+> circuits are now smoke-ceremony output (real `/dev/urandom` entropy per
+> contribution + a real drand beacon, transcript at `ceremony/transcript.md`,
+> independently re-verified via `scripts/ceremony-verify.sh`), replacing the
+> previous state where every embedded VK came from a **hardcoded, literally
+> public entropy string** (`-e="opaq deterministic entropy"` — not merely
+> unaudited, an actual checked-in backdoor anyone could read off the page).
+> This is a real improvement, not a cosmetic one — but per the "what toxic
+> waste is" discussion above, it is **still not trustworthy for real funds**:
+> one machine saw every contribution round, so nobody outside can verify the
+> toxic waste was genuinely destroyed rather than retained. A trustworthy run
+> still needs **independent contributors + a pinned (not "latest") beacon** —
+> the social step the scripts can't supply. See `ceremony/README.md`.
 
 [jamesbachini/Noir-Groth16]: https://github.com/jamesbachini/Noir-Groth16
 
