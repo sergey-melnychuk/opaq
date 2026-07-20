@@ -158,8 +158,11 @@ authoritative state directly (`OpaqPool.nullifierSpent` / Solana's
 `NullifierSet`) — the EVM leg via DFINITY's existing `evm-rpc-canister`
 (already-built multi-provider consensus + finality-tag support), the Solana
 leg via the canister's own HTTPS outcalls against a small hardcoded RPC set,
-since no DFINITY-maintained equivalent exists there — fully spec'd in B.14,
-not yet built. Rungs 3 (in-canister Solana light client) and 4 (light
+since no DFINITY-maintained equivalent exists there — fully spec'd in B.14;
+implementation underway (P5.0–P5.2 done and verified live locally,
+`canister/opaq-attestor/`; P5.3 — the live devnet/testnet round trip — is
+next, blocked on a testnet-ETH funding decision, see B.14.6). Rungs 3
+(in-canister Solana light client) and 4 (light
 clients on both L1s, no third chain) are explicitly out of scope: 3's added
 implementation risk (bespoke, unaudited consensus-verification code) is judged
 not worth its marginal trust reduction over 2, and 4 is not currently tractable
@@ -1808,38 +1811,121 @@ is already precise without this, since `nullifierSpent` is written only by
 **B.14.6 Build phases (P5, mirrors P2/P3/P4's style).** Shrunk materially by
 B.14.2/B.14.4's split — the EVM leg no longer needs its own multi-provider
 agreement or finality logic built from scratch.
-- **P5.0 — canister scaffold.** `dfx` project, `ic-cdk` Rust canister, derive
-  a threshold-ECDSA EVM address + threshold-Ed25519 Solana address on local
-  replica (`dfx start`). *Accept:* canister produces a valid signature over a
-  known message for both key types; recovered address/pubkey matches what the
-  management canister reports.
-- **P5.1 — EVM leg via `evm-rpc-canister`.** Inter-canister call to
-  `eth_call(OpaqPool_addr, nullifierSpent(nullifier), block: Finalized)` and
-  to `eth_sendRawTransaction` for submitting `addPending`. *Accept:* a known
-  spent/unspent nullifier returns `Consistent(true/false)` correctly; a
-  submitted `addPending` tx lands and is queryable back via the same
-  `eth_call` path.
-- **P5.2 — Solana leg: hardcoded-URL outcalls + named-transaction
-  verification.** `ic-cdk` HTTP outcalls (with a `transform` function) to 3
-  hardcoded Solana RPC endpoints, `getTransaction(src_tx_signature)` at
-  `"finalized"` commitment, require ≥2-of-3 agreement, then check (per
-  B.14.2's fix): tx succeeded, first instruction-data byte is tag `8`, and
-  its embedded public inputs exactly match the requester's claimed
-  `(nullifier, dest_chain, out_commitment)`. *Accept:* a genuine finalized
-  `xburn` tx with matching claims -> attests; a `withdraw`/`transfer`/`burn`
-  tx recording the *same* nullifier (different tag) -> rejects, does not
-  attest (the specific bug this design closes); mismatched claimed
-  `out_commitment`/`dest_chain` against what the named tx actually recorded
-  -> rejects; a simulated disagreeing endpoint -> rejects/retries. Also
-  covers Solana-side submission (`sendTransaction` for `add_pending_xburn`)
-  via the same hardcoded endpoints.
-- **P5.3 — end-to-end attestation, one direction.** Canister checks a REAL
-  `xburn` nullifier on a public Solana **devnet** (the Solana leg needs real
-  reachable HTTPS endpoints — this is the one leg in the whole project that
-  can't run against a purely local validator, unlike every m-numbered test
-  so far) past finality, threshold-signs and submits `addPending` via
-  `evm-rpc-canister` on an EVM **testnet**. *Accept:* the attestation lands
-  with no human signing anything; a subsequent mint using it succeeds.
+- **P5.0 — canister scaffold. DONE.** `canister/opaq-attestor/`, scaffolded
+  via `icp-cli` (`dfx`'s current successor; see `icp.yaml`), `ic-cdk` 0.19
+  Rust canister, isolated `[workspace]` (own `Cargo.lock`, same reason as
+  `programs/poseidon-syscall-check`: a `wasm32-unknown-unknown` dependency
+  graph — `k256`, `ed25519-dalek`, `getrandom` w/ `custom` feature stub since
+  the wasm target has no OS RNG and every path here is deterministic anyway —
+  doesn't belong in the main workspace). Derives a threshold-ECDSA EVM address
+  (`evm_address`) + threshold-Ed25519 Solana address (`solana_address`) via
+  the `dfx_test_key` local-replica test key; `evm_sign_and_verify` /
+  `solana_sign_and_verify` sign a message through the management canister and
+  independently verify the signature against the reported pubkey inside the
+  same call. *Accept, verified on `icp network start -d` + `icp deploy`:* all
+  four calls succeed; both `*_sign_and_verify` return `Ok` matching the
+  address/pubkey `evm_address`/`solana_address` report. One real bug hit and
+  fixed along the way: RustCrypto's `Verifier::verify` silently re-hashes its
+  input with SHA-256 before checking — since `sign_with_ecdsa` signs the given
+  32-byte hash directly with no re-hashing, verification must use
+  `PrehashVerifier::verify_prehash` instead, or a genuinely valid signature
+  fails to verify.
+- **P5.1 — EVM leg via `evm-rpc-canister`. DONE.** `src/evm.rs` (read:
+  `check_nullifier_spent`/`read_pending_mint`, both `eth_call` via
+  `evm_rpc_client`/`RpcServices::Custom` so the same code path runs against
+  local anvil now and a real chain in P5.3+) + `src/evm_tx.rs` (write:
+  `submit_add_pending` — builds and threshold-ECDSA-signs a legacy/EIP-155 tx
+  entirely in-canister — no external signer at any point — RLP-encodes it by
+  hand, tries both ECDSA recovery ids against the canister's own known pubkey
+  to pick `v` since `sign_with_ecdsa` doesn't return one, then submits via
+  `send_raw_transaction`). *Accept, verified live against a local anvil +
+  locally-deployed `evm_rpc` canister:* `check_nullifier_spent` on a fresh
+  pool returns `false`; after flipping `nullifierSpent`'s storage slot
+  (`forge inspect storage-layout` → slot 83) for one specific nullifier, it
+  returns `true` for that nullifier and `false` for an unrelated one —
+  proving the canister reads real contract state, not a cached/mocked value.
+  `submit_add_pending` (pool redeployed with the canister's own derived
+  address as `operator`, funded with test ETH) lands a real signed tx; the
+  resulting `pendingMint[nullifier]` — read back through the identical
+  `eth_call` path used to check it — exactly matches
+  `keccak256(destChain, outCommitment)` computed independently via `cast`.
+  The `Finalized` block tag (B.14.3) is a caller-supplied bool rather than
+  hardcoded: anvil pins `finalized`/`safe` to genesis unconditionally (no
+  real single-node dev-chain finality to track), so a hardcoded `Finalized`
+  would have made this untestable locally; there's also no governance/config
+  layer yet (P5.5) to force it in production, so this is a known gap to close
+  before anything but local dev.
+- **P5.2 — Solana leg: outcalls + named-transaction verification. DONE.**
+  `src/solana.rs` (read: `verify_xburn_transaction` — raw `ic_cdk` HTTP
+  outcalls, `getTransaction(sig, {encoding:"json", commitment:"finalized"})`
+  against a caller-supplied RPC list, `≥agree_threshold`-of-N structural
+  agreement across independent responses, i.e. generalized ≥2-of-3) + one
+  hand-rolled Solana wire-transaction builder for the write side
+  (`src/solana_tx.rs`: `submit_add_pending_xburn` — legacy-message RLP-free
+  Solana wire format, PDA re-derivation via raw SHA-256 + Ed25519 off-curve
+  check since there's no solana-sdk dependency here, threshold-Schnorr/
+  Ed25519-signed entirely in-canister, submitted via `sendTransaction`).
+  Verification checks exactly what B.14.2 requires: tx succeeded, the
+  instruction actually addressed to the opaq program starts with tag `8`,
+  and its own (nullifier, dest_chain, out_commitment) — read out of that
+  instruction's data, not a separate nullifier-set lookup — match the
+  requester's claim. *Accept, verified live* against a local
+  `solana-test-validator` (real deposit + real `xburn`, tag 8, produced via
+  `scripts/p5.2-solana-fixture.sh`): the genuine finalized xburn tx with
+  matching claims attests; the SAME nullifier's real deposit tx (tag 1, a
+  different instruction) is rejected with an explicit tag-mismatch reason —
+  the exact "log != transfer" bug this design exists to close, reproduced
+  and closed live, not just argued in prose; tampering with any one of
+  nullifier/dest_chain/out_commitment while keeping the real signature is
+  independently rejected for each field; the N-of-M agreement logic was
+  exercised directly (2-of-2 with one endpoint unreachable -> rejects;
+  1-of-2 -> passes through to the semantic check; 2-of-3 with a duplicate
+  real endpoint -> agrees). Write side verified by reading the on-chain
+  `XburnPending` account back afterward (`solana account`, decoded by hand):
+  operator/nullifier/count/minted-flag all matched exactly what the
+  canister submitted. One real, useful finding along the way:
+  `solana-test-validator` keeps NO persistent transaction-history index (no
+  equivalent of `--enable-rpc-transaction-history` exists for it, unlike
+  full `agave-validator`) — `getTransaction`/`getSignatureStatuses` only
+  serve a short in-memory recent-status cache that ages a tx out within
+  roughly a minute of wall-clock time, regardless of commitment level. This
+  is a genuinely different limitation than the one the original spec here
+  assumed (HTTPS-only outcalls) — P5.1 already proved plain `http://`
+  outcalls work fine locally (`RpcServices::Custom` reached anvil directly),
+  and this leg's own raw outcalls reached `solana-test-validator` over plain
+  HTTP too. The real constraint is retention, not scheme, and it only
+  affects the READ/verify path (the write path reads back live account
+  state, which has no such expiry) — see the revised B.14.7 note below.
+- **P5.3 — end-to-end attestation, one direction. NEXT — one decision open,
+  not yet started.** Canister checks a REAL `xburn` nullifier on a public
+  Solana **devnet** past finality, threshold-signs and submits `addPending`
+  via `evm-rpc-canister` on an EVM **testnet** (Sepolia, most likely — it's
+  one of `evm-rpc-canister`'s built-in chains, `RpcServices::EthSepolia`, no
+  `Custom` config needed). *Accept:* the attestation lands with no human
+  signing anything; a subsequent mint using it succeeds.
+
+  **Decided:** the canister stays on the **local ICP replica** for this
+  milestone (`icp network start -d` + `icp deploy`, same as P5.0–P5.2),
+  using the insecure local `dfx_test_key`/local Ed25519 test key — NOT
+  deployed to ICP mainnet. This still genuinely exercises the protocol (real
+  finality latency, real named-transaction verification, a real cross-chain
+  mint) since the local replica's HTTP outcalls are real network calls out
+  to real public devnet/testnet endpoints (already proven true for anvil in
+  P5.1 and for `solana-test-validator` in P5.2) — only the canister's own
+  *identity* is a stand-in for a production `key_1`-backed mainnet
+  deployment, which is a separate, later decision (ties into B.14.7's
+  canister-governance gap).
+
+  **Open, blocking:** how to fund a Sepolia (or chosen testnet) deployer
+  key. `OpaqPool.sol` + its xburn verifier need deploying there, and the
+  canister's own derived EVM address needs enough testnet ETH to submit
+  `addPending`. Options on the table, undecided: (a) the user supplies an
+  already-funded testnet private key — fastest, no faucet risk; (b) attempt
+  a public faucet directly — likely blocked by CAPTCHA/mainnet-balance
+  gating; (c) pick a different, more permissively-fauceted EVM testnet
+  instead of Sepolia. Solana devnet has no equivalent blocker — SOL is
+  freely available via `solana airdrop` there, same as every prior
+  devnet deployment in this project (`deploy/devnet-latest.json`).
 - **P5.4 — reverse direction.** Same, EVM testnet -> Solana devnet: check via
   `evm-rpc-canister`, submit via the Solana leg's hardcoded endpoints.
   Symmetric per B.12.3.
@@ -1849,13 +1935,22 @@ agreement or finality logic built from scratch.
   milestone, but a real prerequisite for anything long-running.
 
 **B.14.7 Open risks / honest caveats.**
-- **Can't be tested fully locally, and only on one leg now.** Every milestone
-  so far in this project (M0–M21) ran end-to-end against a local
-  `solana-test-validator` + `anvil`, fast and fully reproducible. The Solana
-  leg (P5.2–P5.4) needs public devnet endpoints reachable from ICP's boundary
-  nodes — slower, less controllable. The EVM leg is less exposed to this
-  since `evm-rpc-canister` also supports testnets (`EthSepolia`), but neither
-  leg gets the fast local loop every prior milestone had.
+- **P5.3/P5.4's live devnet/testnet round trip isn't replaceable by local
+  testing, but not for the reason originally assumed here.** P5.0–P5.2
+  turned out to be fully testable against `anvil` + `solana-test-validator`
+  (both proved locally: plain `http://` outcalls work fine from a local
+  icp-cli network — `RpcServices::Custom` and this canister's own raw
+  outcalls both reached local nodes directly, no HTTPS-only wall). The real
+  local-only gap that surfaced instead: `solana-test-validator` keeps no
+  persistent transaction-history index, so `verify_xburn_transaction`
+  against it only works within roughly a minute of the transaction landing
+  — fine for a scripted test, useless for anything long-running. What
+  local testing genuinely CANNOT stand in for either way: real finality
+  latency (~13 min on Ethereum, ~tens of seconds on Solana, vs. instant on
+  a single-node dev chain) and real independent multi-provider agreement
+  (evm-rpc-canister's built-in providers, and whichever 3 real Solana RPC
+  endpoints get hardcoded for B.14.5's config) — a local test only ever has
+  one node's opinion to check against itself.
 - **New external dependency.** The EVM leg now depends on a canister this
   project doesn't control — DFINITY's `evm-rpc-canister`, on its own
   fiduciary subnet. That's a reasonable trade (mature, maintained, used by

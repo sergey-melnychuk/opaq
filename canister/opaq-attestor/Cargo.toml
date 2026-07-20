@@ -1,0 +1,26 @@
+[workspace]
+
+[package]
+name = "opaq_attestor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = "0.10"
+ic-cdk = "0.19"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
+ed25519-dalek = { version = "2", default-features = false }
+hex = "0.4"
+bs58 = "0.5"
+getrandom = { version = "0.2", features = ["custom"] }
+evm_rpc_client = "0.4"
+evm_rpc_types = "3"
+ic-canister-runtime = "0.2"
+serde_json = "1"
+sha2 = "0.10"
+curve25519-dalek = "4"
+base64 = "0.22"

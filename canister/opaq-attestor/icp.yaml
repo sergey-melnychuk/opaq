@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v1.0.0/docs/schemas/icp-yaml-schema.json
+canisters:
+  - name: opaq_attestor
+    recipe:
+      type: "@dfinity/rust@v3.3.0"
+      configuration:
+        shrink: true
+        # optional
+        candid: opaq-attestor.did
+        metadata:
+          - name: "crate:version"
+            value: 1.0.0
+  # evm-rpc-canister (P5.1, OPAQ.md B.14.1): only needed here for LOCAL dev —
+  # the local replica has no evm_rpc canister pre-installed, so we deploy our
+  # own copy of the same pre-built WASM DFINITY ships. On mainnet the shared
+  # canister at 7hfb6-caaaa-aaaar-qadga-cai is used instead — never deploy a
+  # private instance there.
+  - name: evm_rpc
+    build:
+      steps:
+        - type: pre-built
+          url: https://github.com/dfinity/evm-rpc-canister/releases/latest/download/evm_rpc.wasm.gz
+    init_args: "(record {})"
+
+# Gateway port moved off the 8000 default: solana-test-validator's dynamic
+# TVU/TPU port range can land on 8000 too (observed while testing P5.2's
+# Solana leg alongside a local validator), colliding with icp-cli's gateway.
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 8010
+
+environments:
+  - name: local
+    network: local
+    canisters: [opaq_attestor, evm_rpc]
+  - name: ic
+    network: ic
+    canisters: [opaq_attestor]
+    settings:
+      opaq_attestor:
+        environment_variables:
+          PUBLIC_CANISTER_ID:evm_rpc: "7hfb6-caaaa-aaaar-qadga-cai"
+

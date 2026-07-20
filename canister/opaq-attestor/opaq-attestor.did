@@ -1,0 +1,11 @@
+service : {
+  evm_address : () -> (text);
+  solana_address : () -> (text);
+  evm_sign_and_verify : (text) -> (variant { Ok : text; Err : text });
+  solana_sign_and_verify : (text) -> (variant { Ok : text; Err : text });
+  check_nullifier_spent : (nat64, text, text, text, bool) -> (variant { Ok : bool; Err : text });
+  read_pending_mint : (nat64, text, text, text, bool) -> (variant { Ok : text; Err : text });
+  submit_add_pending : (nat64, text, text, text, text, text) -> (variant { Ok : text; Err : text });
+  verify_xburn_transaction : (vec text, nat32, text, text, text, text, text) -> (variant { Ok : text; Err : text });
+  submit_add_pending_xburn : (text, text, text, text, text) -> (variant { Ok : text; Err : text });
+}
